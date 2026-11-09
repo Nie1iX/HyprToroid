@@ -19,7 +19,7 @@ The Arch package installs these runtime paths, with no dependency on where the s
 Clone the public source, then build from a **separate working directory** outside the checkout. The package downloads the independent Hyprsession source at a pinned commit and verifies its checksum; a sibling checkout is not required.
 
 ```sh
-git clone https://github.com/Nie1iX/hyprtoroid.git "$HOME/hyprtoroid"
+git clone https://github.com/Nie1iX/HyprToroid.git "$HOME/hyprtoroid"
 package_dir=$(mktemp -d /tmp/hyprtoroid-package.XXXXXXXX)
 cd "$package_dir"
 cp "$HOME/hyprtoroid/packaging/PKGBUILD" .

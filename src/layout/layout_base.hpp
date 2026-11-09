@@ -44,20 +44,20 @@ class HTLayoutBase {
     };
 
     virtual CBox calculate_ws_box(int x, int y, HTViewStage stage) = 0;
-    std::unordered_map<WORKSPACEID, HTWorkspace> overview_layout;
+    std::unordered_map<WorkspaceNumber, HTWorkspace> overview_layout;
 
     // Warp the show/hide animations to perc (from closed to open)
     virtual void close_open_lerp(float perc) = 0;
     virtual void on_show(CallbackFun on_complete = nullptr) = 0;
     virtual void on_hide(CallbackFun on_complete = nullptr) = 0;
     virtual void
-    on_move(WORKSPACEID old_id, WORKSPACEID new_id, CallbackFun on_complete = nullptr) = 0;
+    on_move(WorkspaceNumber old_id, WorkspaceNumber new_id, CallbackFun on_complete = nullptr) = 0;
     virtual void on_move_swipe(Vector2D delta);
     // Returns the workspace id that the swipe should snap to
-    virtual WORKSPACEID on_move_swipe_end();
+    virtual std::optional<WorkspaceNumber> on_move_swipe_end();
 
     // Get the workspace up/down left/right relative to the workspace at (x, y)
-    virtual WORKSPACEID get_ws_id_in_direction(int x, int y, std::string& direction);
+    virtual std::optional<WorkspaceNumber> get_ws_id_in_direction(int x, int y, std::string& direction);
 
     // Return true if should cancel
     virtual bool on_mouse_axis(double delta);
@@ -78,8 +78,8 @@ class HTLayoutBase {
     virtual void render();
 
     // Workspaces in the same visual order used by the keyboard jump labels.
-    std::vector<WORKSPACEID> jump_targets() const;
-    std::optional<WORKSPACEID> jump_target(size_t index) const;
+    std::vector<WorkspaceNumber> jump_targets() const;
+    std::optional<WorkspaceNumber> jump_target(size_t index) const;
 
     // Prevent simplification from happening in the plugin, remove all clear pass objects
     void post_render();
@@ -88,14 +88,14 @@ class HTLayoutBase {
     void render_jump_labels();
 
     PHLMONITOR get_monitor();
-    WORKSPACEID get_ws_id_from_global(Vector2D pos);
-    WORKSPACEID get_ws_id_from_xy(int x, int y);
+    std::optional<WorkspaceNumber> get_ws_id_from_global(Vector2D pos);
+    std::optional<WorkspaceNumber> get_ws_id_from_xy(int x, int y);
     std::pair<int, int> get_current_ws_xy();
-    CBox get_global_window_box(PHLWINDOW window, WORKSPACEID workspace_id);
-    CBox get_global_ws_box(WORKSPACEID workspace_id);
+    CBox get_global_window_box(PHLWINDOW window, WorkspaceNumber workspace_id);
+    CBox get_global_ws_box(WorkspaceNumber workspace_id);
 
-    Vector2D global_to_local_ws_scaled(Vector2D pos, WORKSPACEID workspace_id);
-    Vector2D global_to_local_ws_unscaled(Vector2D pos, WORKSPACEID workspace_id);
-    Vector2D local_ws_scaled_to_global(Vector2D pos, WORKSPACEID workspace_id);
-    Vector2D local_ws_unscaled_to_global(Vector2D pos, WORKSPACEID workspace_id);
+    Vector2D global_to_local_ws_scaled(Vector2D pos, WorkspaceNumber workspace_id);
+    Vector2D global_to_local_ws_unscaled(Vector2D pos, WorkspaceNumber workspace_id);
+    Vector2D local_ws_scaled_to_global(Vector2D pos, WorkspaceNumber workspace_id);
+    Vector2D local_ws_unscaled_to_global(Vector2D pos, WorkspaceNumber workspace_id);
 };

@@ -1,0 +1,71 @@
+# Build outside the checkout: HYPRTOROID_SOURCE_DIR=/path/to/hyprtoroid makepkg
+pkgname=hyprtoroid
+pkgver=0.1.0
+pkgrel=5
+pkgdesc='Toroidal workspace plugin and Hyprland session'
+url='https://github.com/Nie1iX/hyprtoroid'
+arch=('x86_64')
+license=('BSD-3-Clause' 'GPL-3.0-only')
+depends=('hyprland' 'noctalia' 'kitty' 'fuzzel' 'python' 'libinput' 'libdrm' 'pixman' 'pango' 'systemd-libs' 'wayland' 'libxkbcommon' 'bubblewrap' 'dbus' 'util-linux')
+makedepends=('meson' 'ninja' 'pkgconf' 'cargo')
+optdepends=('uwsm: managed sessions')
+_hyprsession_commit=180340f21066f436ccb451af87e19e8d470bc036
+source=()
+sha256sums=()
+if [[ -z ${HYPRSESSION_SOURCE_DIR:-} ]]; then
+    source=("hyprsession-${_hyprsession_commit}.tar.gz::https://github.com/Nie1iX/hyprsession/archive/${_hyprsession_commit}.tar.gz")
+    sha256sums=('ba31e7c815fb3c35f66899ea2166268e9acd701d7c8a7de72e7130f79733004f')
+fi
+
+prepare() {
+    [[ -n ${HYPRTOROID_SOURCE_DIR:-} && -f $HYPRTOROID_SOURCE_DIR/meson.build ]] || {
+        error 'Set HYPRTOROID_SOURCE_DIR to the HyprToroid checkout'
+        return 1
+    }
+    local source_root session_root work_root checkout
+    source_root=$(realpath "$HYPRTOROID_SOURCE_DIR")
+    session_root=${HYPRSESSION_SOURCE_DIR:-$srcdir/hyprsession-$_hyprsession_commit}
+    [[ -f $session_root/Cargo.toml ]] || {
+        error 'Hyprsession source missing; check the pinned download or HYPRSESSION_SOURCE_DIR'
+        return 1
+    }
+    session_root=$(realpath "$session_root")
+    work_root=$(realpath "$srcdir")
+    local -a local_checkouts=("$source_root")
+    if [[ -n ${HYPRSESSION_SOURCE_DIR:-} ]]; then
+        local_checkouts+=("$session_root")
+    fi
+    for checkout in "${local_checkouts[@]}"; do
+        case "$work_root/" in "$checkout/"*) error 'makepkg work directory must be outside both source checkouts'; return 1 ;; esac
+        case "$checkout/" in "$work_root/"*) error 'source checkouts must be outside the makepkg work directory'; return 1 ;; esac
+    done
+    mkdir -p "$srcdir/source" "$srcdir/hyprsession"
+    tar -C "$source_root" --exclude=./.git --exclude=./build --exclude=./.cache -cf - . |
+        tar -C "$srcdir/source" -xf -
+    tar -C "$session_root" --exclude=./.git --exclude=./target -cf - . |
+        tar -C "$srcdir/hyprsession" -xf -
+}
+
+build() {
+    meson setup "$srcdir/build" "$srcdir/source" --prefix=/usr --buildtype=release
+    meson compile -C "$srcdir/build" -j 4
+    CARGO_TARGET_DIR="$srcdir/cargo-target" "${CARGO:-cargo}" build --release --locked --manifest-path "$srcdir/hyprsession/Cargo.toml"
+}
+
+package() {
+    local root=$srcdir/source entry
+    install -Dm755 "$root/bin/hyprtoroid" "$pkgdir/usr/bin/hyprtoroid"
+    install -Dm755 "$srcdir/build/libhyprtoroid.so" "$pkgdir/usr/lib/hyprtoroid/libhyprtoroid.so"
+    install -Dm755 "$srcdir/cargo-target/release/hyprsession" "$pkgdir/usr/lib/hyprtoroid/hyprsession"
+    install -Dm644 "$root/session/hyprland.lua" "$pkgdir/usr/share/hyprtoroid/hyprland.lua"
+    install -Dm644 "$root/session/keybindings.txt" "$pkgdir/usr/share/hyprtoroid/keybindings.txt"
+    install -Dm644 "$root/session/keybindings.ru.txt" "$pkgdir/usr/share/hyprtoroid/keybindings.ru.txt"
+    install -d "$pkgdir/usr/share/hyprtoroid/noctalia-plugins"
+    cp -a "$root/noctalia-plugins/." "$pkgdir/usr/share/hyprtoroid/noctalia-plugins/"
+    install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/hyprtoroid/plugin-BSD-3-Clause"
+    install -Dm644 "$srcdir/hyprsession/LICENSE" "$pkgdir/usr/share/licenses/hyprtoroid/hyprsession-GPL-3.0"
+    install -Dm644 "$root/README.md" "$pkgdir/usr/share/doc/hyprtoroid/README.md"
+    for entry in "$root/packaging/hyprtoroid.desktop" "$root/packaging/hyprtoroid-uwsm.desktop"; do
+        install -Dm644 "$entry" "$pkgdir/usr/share/wayland-sessions/${entry##*/}"
+    done
+}

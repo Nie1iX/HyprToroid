@@ -23,7 +23,7 @@ class HTLayoutLinear: public HTLayoutBase {
     virtual void close_open_lerp(float perc);
     virtual void on_show(CallbackFun on_complete);
     virtual void on_hide(CallbackFun on_complete);
-    virtual void on_move(WORKSPACEID old_id, WORKSPACEID new_id, CallbackFun on_complete);
+    virtual void on_move(WorkspaceNumber old_id, WorkspaceNumber new_id, CallbackFun on_complete);
 
     virtual bool on_mouse_axis(double delta);
 

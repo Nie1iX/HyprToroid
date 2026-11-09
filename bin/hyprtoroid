@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+prefix=$(dirname -- "$(dirname -- "$(readlink -f -- "$0")")")
+export HYPRTOROID_DATA_DIR="$prefix/share/hyprtoroid" HYPRTOROID_LIB_DIR="$prefix/lib/hyprtoroid"
+config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/hyprtoroid
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/hyprtoroid
+selector=$config_dir/plugin-path
+installed=$HYPRTOROID_LIB_DIR/libhyprtoroid.so
+
+fail() { printf 'hyprtoroid: %s\n' "$*" >&2; exit 1; }
+usage() {
+    cat <<'EOF'
+Usage: hyprtoroid [--session|--managed-session] [--gpu auto|intel|nvidia]
+       hyprtoroid dev build|reload [--active-plugin ABSOLUTE_PATH]|preview
+       hyprtoroid status|logout|help
+EOF
+}
+source_root() {
+    local root=${HYPRTOROID_SOURCE:-}
+    if [[ -z $root && -f $config_dir/dev-source ]]; then IFS= read -r root < "$config_dir/dev-source" || :; fi
+    root=${root:-$HOME/hyprtoroid}
+    [[ -f $root/meson.build ]] || fail "Source not found at $root; set HYPRTOROID_SOURCE or $config_dir/dev-source"
+    realpath -- "$root"
+}
+selected_plugin() {
+    if [[ -f $selector ]]; then
+        IFS= read -r selected < "$selector" || :
+        [[ $selected == /* && -f $selected ]] || fail "Invalid plugin selector: $selector"
+    else
+        selected=$installed
+        [[ -f $selected ]] || fail "Plugin not found: $selected"
+    fi
+}
+build() {
+    local root output
+    root=${1:-$(source_root)}
+    output=$root/build/libhyprtoroid.so
+    build_previous=''
+    if [[ -f $output ]]; then
+        mkdir -p -- "$state_dir/candidates"
+        build_previous=$(mktemp "$state_dir/candidates/previous-XXXXXXXX.so")
+        mv -f -- "$output" "$build_previous"
+    fi
+    if { if [[ -f $root/build/build.ninja ]]; then
+        env -u LD_LIBRARY_PATH -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH \
+            PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig CC=/usr/bin/cc CXX=/usr/bin/c++ PATH=/usr/bin:/bin \
+            meson setup --clearcache --reconfigure "$root/build" "$root" --buildtype=debugoptimized -Dcpp_std=c++23
+    else
+        env -u LD_LIBRARY_PATH -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH \
+            PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig CC=/usr/bin/cc CXX=/usr/bin/c++ PATH=/usr/bin:/bin \
+            meson setup "$root/build" "$root" --buildtype=debugoptimized -Dcpp_std=c++23
+    fi; } && env -u LD_LIBRARY_PATH -u PKG_CONFIG_PATH -u CMAKE_PREFIX_PATH \
+        PKG_CONFIG_LIBDIR=/usr/lib/pkgconfig:/usr/share/pkgconfig CC=/usr/bin/cc CXX=/usr/bin/c++ PATH=/usr/bin:/bin \
+        meson compile -C "$root/build" -j 4; then
+        return 0
+    fi
+    [[ -z $build_previous ]] || mv -f -- "$build_previous" "$output"
+    fail 'Build failed'
+}
+
+reply_ok() {
+    local reply
+    if ! reply=$(hyprctl "$@" 2>&1) || [[ $reply != ok ]]; then
+        printf '%s\n' "$reply" >&2
+        return 1
+    fi
+}
+config_clean() {
+    local errors
+    if ! errors=$(hyprctl configerrors 2>&1); then
+        printf 'Could not query configuration errors: %s\n' "$errors" >&2
+        return 1
+    fi
+    if [[ -n $errors ]]; then
+        printf 'Hyprland configuration errors:\n%s\n' "$errors" >&2
+        return 1
+    fi
+}
+checked_reload() {
+    reply_ok reload && config_clean
+}
+reload_plugin() {
+    local active=${1:-} root candidate tmp had_selector=0 previous_selector='' active_is_build=0
+    [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || fail 'No Hyprland session; refusing reload'
+    hyprctl monitors -j >/dev/null 2>&1 || fail 'Hyprland is not reachable'
+    config_clean || fail 'Existing configuration errors; refusing reload'
+    mkdir -p -- "$state_dir/candidates" "$config_dir"
+    root=$(source_root)
+    exec {lock_fd}<"$root"
+    flock -n "$lock_fd" || fail 'Another development operation is running'
+    if [[ -f $selector ]]; then
+        had_selector=1
+        IFS= read -r previous_selector < "$selector" || :
+    fi
+    if [[ -n $active ]]; then
+        [[ $active == /* && -f $active ]] || fail '--active-plugin must name an existing absolute path'
+    else
+        selected_plugin
+        active=$selected
+    fi
+    [[ ! $active -ef $root/build/libhyprtoroid.so ]] || active_is_build=1
+    build "$root"
+    candidate=$(mktemp "$state_dir/candidates/libhyprtoroid-XXXXXXXX.so")
+    cp -- "$root/build/libhyprtoroid.so" "$candidate"
+    chmod 555 "$candidate"
+    if (( active_is_build )) && [[ -n $build_previous ]]; then
+        mv -f -- "$build_previous" "$root/build/libhyprtoroid.so"
+    elif [[ -n $build_previous ]]; then
+        rm -f -- "$build_previous"
+    fi
+    config_clean || fail 'Configuration errors appeared during build; refusing reload'
+    if ! reply_ok eval 'hl.plugin.hyprtasking.prepare_reload()'; then
+        fail 'Reload refused; running plugin was not unloaded'
+    fi
+    if ! reply_ok plugin unload "$active"; then
+        fail 'Unload failed after preparation; plugin may remain quiesced'
+    fi
+    if ! reply_ok plugin load "$candidate"; then
+        printf 'Candidate load failed; restoring %s\n' "$active" >&2
+        reply_ok plugin load "$active" || fail 'Previous plugin could not be reloaded'
+        if [[ $active == "${previous_selector:-$installed}" ]]; then
+            checked_reload || printf 'Previous plugin loaded but config reload failed\n' >&2
+        fi
+        exit 1
+    fi
+    tmp=$(mktemp "$config_dir/.plugin-path-XXXXXXXX")
+    if ! printf '%s\n' "$candidate" > "$tmp" || ! mv -f -- "$tmp" "$selector" || ! checked_reload; then
+        printf 'Selector or config reload failed; rolling back\n' >&2
+        rm -f -- "$tmp"
+        if (( had_selector )); then
+            tmp=$(mktemp "$config_dir/.plugin-path-XXXXXXXX")
+            printf '%s\n' "$previous_selector" > "$tmp" && mv -f -- "$tmp" "$selector" || fail 'Could not restore plugin selector'
+        else
+            rm -f -- "$selector"
+        fi
+        reply_ok eval 'hl.plugin.hyprtasking.prepare_reload()' || fail 'Candidate is busy; cannot safely roll back'
+        reply_ok plugin unload "$candidate" || fail 'Could not unload candidate during rollback'
+        reply_ok plugin load "$active" || fail 'Previous plugin could not be reloaded'
+        if [[ $active == "${previous_selector:-$installed}" ]]; then
+            checked_reload || fail 'Previous plugin loaded but config reload failed'
+        fi
+        exit 1
+    fi
+    printf 'Reloaded %s\n' "$candidate"
+}
+preview() (
+    local root candidate runtime parent_wayland card cleanup file
+    : "${WAYLAND_DISPLAY:?Preview requires an existing Wayland session}"
+    : "${XDG_RUNTIME_DIR:?Preview requires XDG_RUNTIME_DIR}"
+    parent_wayland=$WAYLAND_DISPLAY
+    [[ $parent_wayland == /* ]] || parent_wayland=$XDG_RUNTIME_DIR/$parent_wayland
+    root=$(source_root)
+    [[ -f $root/build/libhyprtoroid.so ]] || fail 'Run hyprtoroid dev build first'
+    runtime=$(mktemp -d /tmp/ht-XXXXXXXX)
+    printf -v cleanup 'rm -rf -- %q' "$runtime"
+    trap "$cleanup" EXIT
+    mkdir -p -- "$runtime/config/hyprtoroid" "$runtime/state/hyprtoroid/candidates" "$runtime/x11"
+    candidate=$runtime/state/hyprtoroid/candidates/initial.so
+    cp -- "$root/build/libhyprtoroid.so" "$candidate"
+    chmod 555 "$candidate"
+    for file in config.lua keybindings.txt; do
+        if [[ -f $config_dir/$file ]]; then cp -- "$config_dir/$file" "$runtime/config/hyprtoroid/$file"; fi
+    done
+    printf '%s\n' "$root" > "$runtime/config/hyprtoroid/dev-source"
+    printf '%s\n' "$candidate" > "$runtime/config/hyprtoroid/plugin-path"
+    local -a masks=()
+    for card in /dev/dri/card[0-9]*; do
+        [[ -e $card ]] && masks+=(--ro-bind /dev/null "$card")
+    done
+    export WAYLAND_DISPLAY=$parent_wayland XDG_RUNTIME_DIR=$runtime HYPRTOROID_SESSION=0
+    export XDG_CONFIG_HOME=$runtime/config XDG_STATE_HOME=$runtime/state HYPRTOROID_SOURCE=$root
+    export AQ_BACKEND=wayland AQ_DRM_DEVICES=/dev/null LIBSEAT_BACKEND=hyprtoroid-preview HYPRLAND_NO_SD_VARS=1 HYPRLAND_NO_SD_NOTIFY=1
+    unset HYPRLAND_INSTANCE_SIGNATURE HYPRTOROID_UWSM HYPRTOROID_PLUGIN
+    bwrap --die-with-parent --unshare-pid --bind / / --dev-bind /dev /dev --proc /proc \
+        --bind "$runtime/x11" /tmp/.X11-unix "${masks[@]}" -- \
+        dbus-run-session -- start-hyprland -- --config "$HYPRTOROID_DATA_DIR/hyprland.lua"
+)
+session() {
+    local gpu_override='' mode=$1 gpu card vendor preferred='' others='' list=''
+    shift
+    while (($#)); do
+        case $1 in
+            --gpu) (($# >= 2)) || fail '--gpu requires a value'; gpu_override=$2; shift 2 ;;
+            *) fail "Unknown session option: $1" ;;
+        esac
+    done
+    [[ -z ${WAYLAND_DISPLAY:-} && -z ${HYPRLAND_INSTANCE_SIGNATURE:-} && -z ${DISPLAY:-} ]] || fail 'Refusing to start a second graphical session'
+    if [[ -f $config_dir/session.env ]]; then source "$config_dir/session.env"; fi
+    gpu=${gpu_override:-${HYPRTOROID_GPU:-auto}}
+    case $gpu in auto|intel|nvidia) ;; *) fail "Invalid GPU preference: $gpu" ;; esac
+    if [[ $gpu != auto ]]; then
+        for card in /sys/class/drm/card[0-9]*; do
+            [[ ${card##*/} =~ ^card[0-9]+$ && -r $card/device/vendor ]] || continue
+            IFS= read -r vendor < "$card/device/vendor"
+            [[ -e /dev/dri/${card##*/} ]] || continue
+            if [[ ( $gpu == intel && $vendor == 0x8086 ) || ( $gpu == nvidia && $vendor == 0x10de ) ]]; then
+                preferred+=${preferred:+:}/dev/dri/${card##*/}
+            else
+                others+=${others:+:}/dev/dri/${card##*/}
+            fi
+        done
+        [[ -n $preferred ]] || fail "No $gpu DRM card found"
+        list=$preferred${others:+:$others}
+        export AQ_DRM_DEVICES=$list
+    fi
+    unset LD_LIBRARY_PATH AQ_MGPU_VULKAN HYPRTOROID_MGPU_RUNTIME AQ_BACKEND LIBSEAT_BACKEND HYPRTOROID_PLUGIN HYPRTOROID_UWSM HYPRLAND_NO_SD_VARS HYPRLAND_NO_SD_NOTIFY
+    export HYPRTOROID_SESSION=1 XDG_CURRENT_DESKTOP=Hyprland XDG_SESSION_DESKTOP=hyprtoroid
+    if [[ $mode == --managed-session ]]; then
+        export HYPRTOROID_UWSM=1 HYPRLAND_NO_SD_VARS=1 HYPRLAND_NO_SD_NOTIFY=1
+    fi
+    exec start-hyprland -- --config "$HYPRTOROID_DATA_DIR/hyprland.lua"
+}
+case ${1:-help} in
+    help|--help|-h) usage ;;
+    status)
+        selected_plugin
+        printf 'Installed prefix: %s\nSelected plugin: %s\n' "$prefix" "$selected"
+        ;;
+    logout)
+        [[ $# == 1 ]] || fail 'Unexpected arguments'
+        option=''
+        if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+            option=$(hyprctl getoption plugin:hyprtasking:gestures:move_commit_threshold 2>/dev/null) || option=''
+        fi
+        if [[ $option == 'float: '* ]]; then
+            export HYPRSESSION_PATH="$state_dir/hyprsession"
+            exec "$HYPRTOROID_LIB_DIR/hyprsession" logout --dialect lua
+        fi
+        exec noctalia msg session logout
+        ;;
+    --session|--managed-session) session "$@" ;;
+    dev)
+        shift
+        case ${1:-} in
+            build)
+                [[ $# == 1 ]] || fail 'Unexpected arguments'
+                mkdir -p -- "$state_dir"
+                root=$(source_root)
+                exec {lock_fd}<"$root"
+                flock -n "$lock_fd" || fail 'Another development operation is running'
+                build "$root"
+                [[ -z $build_previous ]] || rm -f -- "$build_previous" ;;
+            reload)
+                shift
+                if [[ $# == 0 ]]; then reload_plugin
+                elif [[ $# == 2 && $1 == --active-plugin ]]; then reload_plugin "$2"
+                else fail 'Usage: hyprtoroid dev reload [--active-plugin ABSOLUTE_PATH]'; fi ;;
+            preview) [[ $# == 1 ]] || fail 'Unexpected arguments'; preview ;;
+            *) usage; exit 2 ;;
+        esac ;;
+    *) usage; exit 2 ;;
+esac

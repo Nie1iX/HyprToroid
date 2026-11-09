@@ -1,0 +1,21 @@
+id = "hyprtoroid/minimap"
+name = "HyprToroid Minimap"
+version = "1.0.0"
+plugin_api = 43
+author = "HyprToroid"
+description = "A fixed 3×3 Hyprland workspace indicator, with a clickable desktop variant."
+icon = "layout-grid"
+dependencies = ["python", "hyprland"]
+
+[[service]]
+id = "workspaces"
+entry = "service.luau"
+
+[[widget]]
+id = "bar"
+entry = "bar.luau"
+hover_highlight = false
+
+[[desktop_widget]]
+id = "desktop"
+entry = "desktop.luau"

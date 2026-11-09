@@ -2,10 +2,7 @@
 
 include
 
-share
-
-libhyprtasking.so
+libhyprtoroid.so
 
 build
 
-result

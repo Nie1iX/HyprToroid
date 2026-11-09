@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=HyprToroid
+Comment=HyprToroid desktop session
+Exec=hyprtoroid --session
+TryExec=hyprtoroid
+Type=Application
+Keywords=tiling;wayland;compositor;

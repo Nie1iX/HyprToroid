@@ -5,11 +5,13 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/config/ConfigValue.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/animation/WorkspaceAnimationController.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/pass/RendererHintsPassElement.hpp>
+#include <hyprland/src/render/scene/SceneSelection.hpp>
 #include <hyprutils/math/Vector2D.hpp>
 
 #include "globals.hpp"
@@ -33,15 +35,17 @@ void render_window_at_box(PHLWINDOW window, PHLMONITOR monitor, const Time::stea
     SRenderModifData data {};
     data.modifs.push_back({SRenderModifData::eRenderModifType::RMOD_TYPE_TRANSLATE, transform});
     data.modifs.push_back({SRenderModifData::eRenderModifType::RMOD_TYPE_SCALE, scale});
-    g_pHyprRenderer->m_renderPass.add(
+    IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(
         makeUnique<CRendererHintsPassElement>(CRendererHintsPassElement::SData {data})
     );
 
     g_pHyprRenderer->damageWindow(window);
     ((render_window_t)render_window)(
         g_pHyprRenderer.get(),
+        g_pHyprRenderer->context(),
         window,
         monitor,
+        window->presentation().renderPresentation(eSceneMode::WORKSPACE_WINDOWS),
         time,
         true,
         RENDER_PASS_MAIN,
@@ -49,7 +53,7 @@ void render_window_at_box(PHLWINDOW window, PHLMONITOR monitor, const Time::stea
         true
     );
 
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRendererHintsPassElement>(
+    IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CRendererHintsPassElement>(
         CRendererHintsPassElement::SData {SRenderModifData {}}
     ));
 }
@@ -73,22 +77,23 @@ void render_workspace_at_box(
 
     // Hyprland only fully renders the monitor's active workspace, so make this one
     // active+visible while we render it. The caller restores the original active ws.
+    const bool was_visible = workspace && workspace->visible();
     if (workspace != nullptr) {
         monitor->m_activeWorkspace = workspace;
         Animation::Workspace::startAnimation(
             workspace, Animation::Workspace::ANIMATION_TYPE_IN, false, true
         );
-        workspace->m_visible = true;
+        workspace->setVisible(true);
     }
 
     ((render_workspace_t)(render_workspace_hook->m_original))(
-        g_pHyprRenderer.get(), monitor, workspace, time, render_box
+        g_pHyprRenderer.get(), g_pHyprRenderer->context(), monitor, workspace, time, render_box
     );
 
     if (workspace != nullptr) {
         Animation::Workspace::startAnimation(
             workspace, Animation::Workspace::ANIMATION_TYPE_OUT, false, true
         );
-        workspace->m_visible = false;
+        workspace->setVisible(was_visible);
     }
 }

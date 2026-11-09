@@ -3,8 +3,8 @@
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/devices/IKeyboard.hpp>
 #include <hyprland/src/helpers/AnimatedVariable.hpp>
-#include <unordered_set>
 
+#include "consumed_keys.hpp"
 #include "overview.hpp"
 
 class HTManager {
@@ -29,6 +29,7 @@ class HTManager {
     void remove_view_for_monitor_id(MONITORID mid);
 
     bool start_window_drag();
+    void cancel_pending_window_drag();
     bool end_window_drag();
     bool exit_to_workspace();
     bool on_key(IKeyboard::SKeyEvent event);
@@ -43,11 +44,32 @@ class HTManager {
 
     swipe_state_t swipe_state;
     float swipe_amt;
-    std::unordered_set<uint32_t> jump_pressed_keys;
+    bool swipe_started_open = false;
+    ConsumedKeys consumed_keys;
     void swipe_start();
     bool swipe_update(IPointer::SSwipeUpdateEvent e);
-    bool swipe_end();
+    bool swipe_end(bool cancelled);
 
     bool has_active_view();
     bool cursor_view_active();
+
+  private:
+    struct PendingWindowDrag {
+        PHLWINDOWREF window;
+        PHLWORKSPACEREF workspace;
+        PHLMONITORREF monitor;
+        PHTVIEWREF view;
+        Vector2D press_coords;
+        WorkspaceNumber workspace_id;
+    };
+
+    std::optional<PendingWindowDrag> pending_window_drag;
+
+    void begin_window_drag(
+        PHLWINDOW window,
+        PHLWORKSPACE workspace,
+        PHLMONITOR monitor,
+        PHTVIEW view,
+        Vector2D press_coords
+    );
 };

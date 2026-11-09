@@ -1,5 +1,8 @@
 #include <linux/input-event-codes.h>
 
+#include <algorithm>
+#include <initializer_list>
+#include <string_view>
 #include <cmath>
 
 #include <hyprland/src/Compositor.hpp>
@@ -9,9 +12,9 @@
 #include <hyprland/src/devices/IKeyboard.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/macros.hpp>
-#include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/layout/LayoutManager.hpp>
 #include <hyprland/src/pointer/PointerManager.hpp>
+#include <hyprland/src/pointer/cursor/CursorShapeOverrideController.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/plugins/HookSystem.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
@@ -36,63 +39,100 @@
 using namespace Config::Actions;
 using namespace Config::Values;
 
+static std::vector<CHyprSignalListener> listeners;
+
+static void cleanup() {
+    listeners.clear();
+    if (g_pHyprRenderer) {
+        auto& ctx = g_pHyprRenderer->context();
+        const auto remove_passes = [](auto& pass) {
+            pass.removeAllOfType("HyprtaskingClear");
+            pass.removeAllOfType("HTDisableSimplification");
+        };
+        remove_passes(ctx.m_pass);
+        if (ctx.m_currentPass && ctx.m_currentPass != &ctx.m_pass)
+            remove_passes(*ctx.m_currentPass);
+    }
+    for (auto** hook :
+         {&render_workspace_hook,
+          &render_texture_hook,
+          &render_border_hook,
+          &render_border2_hook,
+          &blur_optimizations_hook,
+          &should_render_window_hook,
+          &is_solitary_blocked_hook}) {
+        if (*hook) {
+            HyprlandAPI::removeFunctionHook(PHANDLE, *hook);
+            *hook = nullptr;
+        }
+    }
+    render_window = nullptr;
+    if (ht_manager) {
+        const bool cursor_owned = std::any_of(
+            ht_manager->views.begin(),
+            ht_manager->views.end(),
+            [](const PHTVIEW& view) { return view && (view->active || view->closing); }
+        );
+        if (cursor_owned)
+            Pointer::Cursor::overrideController->unsetOverride(
+                Pointer::Cursor::CURSOR_OVERRIDE_UNKNOWN
+            );
+        ht_manager->cancel_pending_window_drag();
+        ht_manager->views.clear();
+        ht_manager.reset();
+    }
+}
+
+#define DISPATCHER(name) \
+    static SDispatchResult dispatch_##name(std::string arg); \
+    static int lua_##name(lua_State* L) { \
+        const auto RESULT = dispatch_##name(luaL_optstring(L, 1, "")); \
+        if (!RESULT.success) \
+            return luaL_error(L, "%s", RESULT.error.c_str()); \
+        return 0; \
+    } \
+    static SDispatchResult dispatch_##name(std::string arg)
+
+DISPATCHER(prepare_reload) {
+    if (!ht_manager)
+        return {};
+    if (std::any_of(
+            ht_manager->views.begin(),
+            ht_manager->views.end(),
+            [](const PHTVIEW& view) {
+                return view && (view->active || view->navigating || view->closing);
+            }
+        )
+        || ht_manager->swipe_state != HTManager::HT_SWIPE_NONE || !ht_manager->consumed_keys.ready()
+        || (g_layoutManager && g_layoutManager->dragController()->target())
+        || (g_pHyprRenderer && g_pHyprRenderer->context().active()))
+        return {
+            .success = false,
+            .error =
+                "hyprtasking is busy; close overview and release keys or finish gestures or drags"
+        };
+    cleanup();
+    return {};
+}
+
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
     return HYPRLAND_API_VERSION;
 }
 
-#define DISPATCHER(name) \
-static SDispatchResult dispatch_##name(std::string arg); \
-static int lua_##name(lua_State* L) { \
-    const auto RESULT = dispatch_##name(luaL_optstring(L, 1, ""));   \
-    if (!RESULT.success) \
-        return luaL_error(L, "%s", RESULT.error.c_str()); \
-    return 0; \
-} static SDispatchResult dispatch_##name(std::string arg)
 
-static SDispatchResult dispatch(std::string arg) {
-    const auto DISPATCHSTR = arg.substr(0, arg.find_first_of(' '));
-
-    auto DISPATCHARG = std::string();
-    if ((int)arg.find_first_of(' ') != -1)
-        DISPATCHARG = arg.substr(arg.find_first_of(' ') + 1);
-
-    const auto DISPATCHER = g_pKeybindManager->m_dispatchers.find(DISPATCHSTR);
-    if (DISPATCHER == g_pKeybindManager->m_dispatchers.end())
-        return {.success = false, .error = "invalid dispatcher: " + arg};
-
-    SDispatchResult res = DISPATCHER->second(DISPATCHARG);
-
-    Log::logger->log(
-        LOG,
-        "[Hyprtasking] passthrough dispatch: {} : {}{}",
-        DISPATCHSTR,
-        DISPATCHARG,
-        res.success ? "" : " -> " + res.error
-    );
-
-    return res;
-}
-
-// TODO: remove when hyprlang support is dropped
-static SDispatchResult dispatch_if(std::string arg, bool is_active) {
+static int lua_if(lua_State* L, bool is_active) {
+    luaL_checktype(L, 1, LUA_TFUNCTION);
     if (ht_manager == nullptr)
-        return {.passEvent = true, .success = false, .error = "ht_manager is null"};
+        return luaL_error(L, "%s", "ht_manager is null");
     const PHTVIEW cursor_view = ht_manager->get_view_from_cursor();
     if (cursor_view == nullptr)
-        return {.passEvent = true, .success = false, .error = "cursor_view is null"};
-    if (cursor_view->active != is_active) {
-        switch (Config::mgr()->type()) {
-            // silently exit with no error cuz hyprland
-            // does not have support for error silencing on lua side
-            case Config::CONFIG_LUA:
-                return {};
-            case Config::CONFIG_LEGACY:
-                return {.passEvent = true, .success = false, .error = "predicate not met"};;
-            default:
-                return {.success = false, .error = "what config did vaxry cook again??"};
-        }
-    }
-    return dispatch(arg);
+        return luaL_error(L, "%s", "cursor_view is null");
+    if (cursor_view->active != is_active)
+        return 0;
+    lua_settop(L, 1);
+    lua_pushvalue(L, 1);
+    lua_call(L, 0, LUA_MULTRET);
+    return lua_gettop(L) - 1;
 }
 
 static void set_layer(PHTVIEW view, int new_layer) {
@@ -116,8 +156,8 @@ static void set_layer(PHTVIEW view, int new_layer) {
     //   dispatch hyprtasking:toggle cursor'
     if (view->closing)
         return;
-    Log::logger->log(
-        LOG,
+    LOG(
+        Log::DEBUG,
         "[Hyprtasking] View \"{}\", previous layer: {}, new: {}",
         view->get_monitor()->m_name,
         view->layout->layer,
@@ -160,17 +200,19 @@ static SDispatchResult change_layer(std::string arg, bool move_window) {
     const PHLWORKSPACE active_workspace = monitor->m_activeWorkspace;
     if (active_workspace == nullptr)
         return {.success = false, .error = "active_workspace is null"};
-    const WORKSPACEID source_ws_id = active_workspace->m_id;
+    const auto source_ws_id = active_workspace->numberedID();
+    if (!source_ws_id)
+        return {.success = false, .error = "active workspace is not numbered"};
 
     auto* grid = static_cast<HTLayoutGrid*>(cursor_view->layout.get());
-    const auto src_it = grid->cache().find(source_ws_id);
+    const auto src_it = grid->cache().find(*source_ws_id);
     if (src_it == grid->cache().end())
         return {.success = false, .error = "active workspace not in grid cache"};
 
     const HTGridSlot src_slot = src_it->second;
-    const WORKSPACEID target_ws_id =
+    const auto target_ws_id =
         grid->slot_workspace(resulting_layer, src_slot.x, src_slot.y);
-    if (target_ws_id == WORKSPACE_INVALID)
+    if (!target_ws_id)
         return {.success = false, .error = "target slot has no workspace"};
 
     set_layer(cursor_view, resulting_layer);
@@ -178,12 +220,12 @@ static SDispatchResult change_layer(std::string arg, bool move_window) {
     return {};
 }
 
-DISPATCHER(if_not_active)  {
-    return dispatch_if(arg, false);
+static int lua_if_not_active(lua_State* L) {
+    return lua_if(L, false);
 }
 
-DISPATCHER(if_active) {
-    return dispatch_if(arg, true);
+static int lua_if_active(lua_State* L) {
+    return lua_if(L, true);
 }
 
 DISPATCHER(toggle) {
@@ -191,12 +233,18 @@ DISPATCHER(toggle) {
         return {.success = false, .error = "ht_manager is null"};
 
     if (arg == "all") {
-        if (ht_manager->has_active_view())
+        const bool open = std::any_of(
+            ht_manager->views.begin(),
+            ht_manager->views.end(),
+            [](const PHTVIEW& view) { return view && view->active && !view->closing; }
+        );
+        if (open)
             ht_manager->hide_all_views();
         else
             ht_manager->show_all_views();
     } else if (arg == "cursor" || arg == "") {
-        if (ht_manager->cursor_view_active())
+        const PHTVIEW view = ht_manager->get_view_from_cursor();
+        if (view && view->active && !view->closing)
             ht_manager->hide_all_views();
         else
             ht_manager->show_cursor_view();
@@ -269,6 +317,7 @@ DISPATCHER(killhovered) {
 
 static void hook_render_workspace(
     void* thisptr,
+    CRenderContext& ctx,
     PHLMONITOR monitor,
     PHLWORKSPACE workspace,
     const Time::steady_tp& now,
@@ -276,28 +325,29 @@ static void hook_render_workspace(
 ) {
     if (ht_manager == nullptr) {
         ((render_workspace_t)(render_workspace_hook
-                                  ->m_original))(thisptr, monitor, workspace, now, geometry);
+                                  ->m_original))(thisptr, ctx, monitor, workspace, now, geometry);
         return;
     }
     const PHTVIEW view = ht_manager->get_view_from_monitor(monitor);
-    if ((view != nullptr && view->navigating) || ht_manager->has_active_view()) {
+    if (view != nullptr && (view->navigating || ht_manager->has_active_view())) {
         view->layout->render();
     } else {
         ((render_workspace_t)(render_workspace_hook
-                                  ->m_original))(thisptr, monitor, workspace, now, geometry);
+                                  ->m_original))(thisptr, ctx, monitor, workspace, now, geometry);
     }
 }
 
 typedef void (*render_texture_t)(
     void* thisptr,
+    CRenderContext& ctx,
     SP<Render::ITexture> tex,
     const CBox& box,
     Render::GL::CHyprOpenGLImpl::STextureRenderData data
 );
 
 // True while a tile / dragged-window is being rendered through an active renderModif.
-static bool render_modif_scaled() {
-    auto& render_modif = g_pHyprRenderer->m_renderData.renderModif;
+static bool render_modif_scaled(CRenderContext& ctx) {
+    auto& render_modif = ctx.m_data.renderModif;
     return render_modif.enabled && !render_modif.modifs.empty();
 }
 
@@ -305,12 +355,12 @@ static bool render_modif_scaled() {
 // view animating open/closed on this monitor). Native renderModif paths -- workspace
 // slides, special workspace, etc. -- are left on Hyprland's normal rendering so the
 // fixes below never perturb them.
-static bool ht_scaled_render() {
-    if (ht_manager == nullptr || !render_modif_scaled())
+static bool ht_scaled_render(CRenderContext& ctx) {
+    if (ht_manager == nullptr || !render_modif_scaled(ctx))
         return false;
     if (ht_manager->has_active_view())
         return true;
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto monitor = ctx.m_data.pMonitor.lock();
     if (monitor == nullptr)
         return false;
     const PHTVIEW view = ht_manager->get_view_from_monitor(monitor);
@@ -328,15 +378,16 @@ static bool ht_scaled_render() {
 // rendering (and its damage tracking) is untouched.
 static void hook_render_texture(
     void* thisptr,
+    CRenderContext& ctx,
     SP<Render::ITexture> tex,
     const CBox& box,
     Render::GL::CHyprOpenGLImpl::STextureRenderData data
 ) {
-    auto& render_data = g_pHyprRenderer->m_renderData;
+    auto& render_data = ctx.m_data;
     auto& render_modif = render_data.renderModif;
 
-    if (!ht_scaled_render() || render_data.pMonitor == nullptr) {
-        ((render_texture_t)(render_texture_hook->m_original))(thisptr, tex, box, data);
+    if (!ht_scaled_render(ctx) || render_data.pMonitor == nullptr) {
+        ((render_texture_t)(render_texture_hook->m_original))(thisptr, ctx, tex, box, data);
         return;
     }
 
@@ -360,10 +411,10 @@ static void hook_render_texture(
         render_modif.applyToBox(tbox);
         const auto saved_modif = render_modif;
         render_modif.enabled = false;
-        ((render_texture_t)(render_texture_hook->m_original))(thisptr, tex, tbox, data);
+        ((render_texture_t)(render_texture_hook->m_original))(thisptr, ctx, tex, tbox, data);
         render_modif = saved_modif;
     } else {
-        ((render_texture_t)(render_texture_hook->m_original))(thisptr, tex, box, data);
+        ((render_texture_t)(render_texture_hook->m_original))(thisptr, ctx, tex, box, data);
     }
 
     render_data.clipBox = saved_clip_box;
@@ -371,12 +422,14 @@ static void hook_render_texture(
 
 typedef void (*render_border_t)(
     void* thisptr,
+    CRenderContext& ctx,
     const CBox& box,
     const Config::CGradientValueData& grad,
     Render::GL::CHyprOpenGLImpl::SBorderRenderData data
 );
 typedef void (*render_border2_t)(
     void* thisptr,
+    CRenderContext& ctx,
     const CBox& box,
     const Config::CGradientValueData& grad1,
     const Config::CGradientValueData& grad2,
@@ -392,12 +445,13 @@ typedef void (*render_border2_t)(
 // the same (already-scaled) space. Shared by both renderBorder overloads.
 template <typename Fn>
 static void render_border_scaled(
+    CRenderContext& ctx,
     CBox& box,
     Render::GL::CHyprOpenGLImpl::SBorderRenderData& data,
     Fn&& call_original
 ) {
-    auto& render_modif = g_pHyprRenderer->m_renderData.renderModif;
-    if (!ht_scaled_render()) {
+    auto& render_modif = ctx.m_data.renderModif;
+    if (!ht_scaled_render(ctx)) {
         call_original();
         return;
     }
@@ -411,18 +465,20 @@ static void render_border_scaled(
 
 static void hook_render_border(
     void* thisptr,
+    CRenderContext& ctx,
     const CBox& box,
     const Config::CGradientValueData& grad,
     Render::GL::CHyprOpenGLImpl::SBorderRenderData data
 ) {
     CBox tbox = box;
-    render_border_scaled(tbox, data, [&] {
-        ((render_border_t)(render_border_hook->m_original))(thisptr, tbox, grad, data);
+    render_border_scaled(ctx, tbox, data, [&] {
+        ((render_border_t)(render_border_hook->m_original))(thisptr, ctx, tbox, grad, data);
     });
 }
 
 static void hook_render_border2(
     void* thisptr,
+    CRenderContext& ctx,
     const CBox& box,
     const Config::CGradientValueData& grad1,
     const Config::CGradientValueData& grad2,
@@ -430,21 +486,21 @@ static void hook_render_border2(
     Render::GL::CHyprOpenGLImpl::SBorderRenderData data
 ) {
     CBox tbox = box;
-    render_border_scaled(tbox, data, [&] {
-        ((render_border2_t)(render_border2_hook->m_original))(thisptr, tbox, grad1, grad2, lerp, data);
+    render_border_scaled(ctx, tbox, data, [&] {
+        ((render_border2_t)(render_border2_hook->m_original))(thisptr, ctx, tbox, grad1, grad2, lerp, data);
     });
 }
 
-typedef bool (*blur_optimizations_t)(void* thisptr, PHLLS pLayer, PHLWINDOW pWindow);
+typedef bool (*blur_optimizations_t)(void* thisptr, CRenderContext& ctx, PHLLS pLayer, PHLWINDOW pWindow);
 
 // The optimized blur path samples the precomputed monitor blur framebuffer, which holds
 // the pre-overview desktop and is sampled at the wrong place once tiles are scaled. Force
 // the fresh path during a scaled render so each window's blur is taken from the current
 // framebuffer (the overview as drawn so far), clipped to its tile.
-static bool hook_blur_optimizations(void* thisptr, PHLLS pLayer, PHLWINDOW pWindow) {
-    if (ht_scaled_render())
+static bool hook_blur_optimizations(void* thisptr, CRenderContext& ctx, PHLLS pLayer, PHLWINDOW pWindow) {
+    if (ht_scaled_render(ctx))
         return false;
-    return ((blur_optimizations_t)(blur_optimizations_hook->m_original))(thisptr, pLayer, pWindow);
+    return ((blur_optimizations_t)(blur_optimizations_hook->m_original))(thisptr, ctx, pLayer, pWindow);
 }
 
 static bool hook_should_render_window(void* thisptr, PHLWINDOW window, PHLMONITOR monitor) {
@@ -475,11 +531,9 @@ static void on_mouse_button(IPointer::SButtonEvent e, Event::SCallbackInfo& info
     if (ht_manager == nullptr)
         return;
 
-    const PHTVIEW cursor_view = ht_manager->get_view_from_cursor();
-    if (cursor_view == nullptr)
-        return;
-
     const bool pressed = e.state == WL_POINTER_BUTTON_STATE_PRESSED;
+    if (pressed)
+        ht_manager->cancel_pending_window_drag();
 
     const unsigned int drag_button = HTConfig::value<Config::INTEGER>("drag_button");
     const unsigned int select_button = HTConfig::value<Config::INTEGER>("select_button");
@@ -534,7 +588,7 @@ static void on_swipe_end(IPointer::SSwipeEndEvent e, Event::SCallbackInfo& info)
     // ITrackpadGesture::distance(). When we do consume a swipe from the start,
     // the core never activates a gesture, so its gestureEnd() is a no-op and
     // cancelling gained us nothing.
-    ht_manager->swipe_end();
+    ht_manager->swipe_end(e.cancelled);
 }
 
 static void cancel_event(Event::SCallbackInfo& info) {
@@ -553,14 +607,14 @@ static void register_monitors() {
 
         const PHTVIEW view = ht_manager->get_view_from_monitor(monitor);
         if (view != nullptr) {
-            if (!view->active)
+            if (!view->active && !view->navigating)
                 view->layout->init_position();
             continue;
         }
         ht_manager->views.push_back(makeShared<HTView>(monitor->m_id));
 
-        Log::logger->log(
-            LOG,
+        LOG(
+            Log::DEBUG,
             "[Hyprtasking] Registering view for monitor {} with resolution {}x{}",
             monitor->m_description,
             monitor->m_transformedSize.x,
@@ -597,129 +651,105 @@ static void on_config_reloaded() {
     ht_manager->refresh_all_grid_caches();
 }
 
+static SFunctionMatch find_function(
+    const std::string& name, std::initializer_list<std::string_view> signature_parts
+) {
+    std::optional<SFunctionMatch> result;
+    for (const auto& match : HyprlandAPI::findFunctionsByName(PHANDLE, name)) {
+        if (!std::ranges::all_of(signature_parts, [&](std::string_view part) {
+                return match.demangled.contains(part);
+            }))
+            continue;
+        if (result)
+            fail_exit("Ambiguous hook signature for {}", name);
+        result = match;
+    }
+    if (!result)
+        fail_exit("No compatible hook signature for {}", name);
+    return std::move(*result);
+}
+
 static void init_functions() {
-    bool success = true;
+    const auto hook = [](const SFunctionMatch& match, void* replacement) {
+        auto* result = HyprlandAPI::createFunctionHook(PHANDLE, match.address, replacement);
+        if (!result)
+            fail_exit("Could not create hook {}", match.demangled);
+        if (!result->hook()) {
+            HyprlandAPI::removeFunctionHook(PHANDLE, result);
+            fail_exit("Could not install hook {}", match.demangled);
+        }
+        LOG(Log::DEBUG, "[Hyprtasking] Hooked {}", match.demangled);
+        return result;
+    };
 
-    static auto FNS1 = HyprlandAPI::findFunctionsByName(PHANDLE, "renderWorkspace");
-    if (FNS1.empty())
-        fail_exit("No renderWorkspace!");
-    render_workspace_hook =
-        HyprlandAPI::createFunctionHook(PHANDLE, FNS1[0].address, (void*)hook_render_workspace);
-    Log::logger->log(LOG, "[Hyprtasking] Attempting hook {}", FNS1[0].signature);
-    success = render_workspace_hook->hook();
-
-    // Specific renderTexture overload taking STextureRenderData (several functions
-    // share the "renderTexture" name). Used to keep the per-surface scissor in sync
-    // with the active renderModif so scaled overview renders aren't culled.
-    static auto FNS_RT = HyprlandAPI::findFunctionsByName(
-        PHANDLE,
-        "_ZN6Render2GL15CHyprOpenGLImpl13renderTextureEN9Hyprutils6Memory14CSharedPointerINS_8ITextureEEERKNS2_4Math4CBoxENS1_18STextureRenderDataE"
-    );
-    if (FNS_RT.empty())
-        fail_exit("No renderTexture");
-    render_texture_hook =
-        HyprlandAPI::createFunctionHook(PHANDLE, FNS_RT[0].address, (void*)hook_render_texture);
-    Log::logger->log(LOG, "[Hyprtasking] Attempting hook {}", FNS_RT[0].signature);
-    success = render_texture_hook->hook() && success;
-
-    // Both renderBorder overloads, kept in sync with the active renderModif so scaled
-    // overview window borders aren't culled (see render_border_scaled).
-    static auto FNS_RB = HyprlandAPI::findFunctionsByName(
-        PHANDLE,
-        "_ZN6Render2GL15CHyprOpenGLImpl12renderBorderERKN9Hyprutils4Math4CBoxERKN6Config18CGradientValueDataENS1_17SBorderRenderDataE"
-    );
-    if (FNS_RB.empty())
-        fail_exit("No renderBorder");
-    render_border_hook =
-        HyprlandAPI::createFunctionHook(PHANDLE, FNS_RB[0].address, (void*)hook_render_border);
-    Log::logger->log(LOG, "[Hyprtasking] Attempting hook {}", FNS_RB[0].signature);
-    success = render_border_hook->hook() && success;
-
-    static auto FNS_RB2 = HyprlandAPI::findFunctionsByName(
-        PHANDLE,
-        "_ZN6Render2GL15CHyprOpenGLImpl12renderBorderERKN9Hyprutils4Math4CBoxERKN6Config18CGradientValueDataESA_fNS1_17SBorderRenderDataE"
-    );
-    if (FNS_RB2.empty())
-        fail_exit("No renderBorder (lerp)");
-    render_border2_hook =
-        HyprlandAPI::createFunctionHook(PHANDLE, FNS_RB2[0].address, (void*)hook_render_border2);
-    Log::logger->log(LOG, "[Hyprtasking] Attempting hook {}", FNS_RB2[0].signature);
-    success = render_border2_hook->hook() && success;
-
-    // Force the fresh blur path during scaled renders (see hook_blur_optimizations).
-    static auto FNS_BO = HyprlandAPI::findFunctionsByName(
-        PHANDLE,
-        "_ZN6Render13IHyprRenderer29shouldUseNewBlurOptimizationsEN9Hyprutils6Memory14CSharedPointerIN7Desktop4View13CLayerSurfaceEEENS3_INS5_7CWindowEEE"
-    );
-    if (FNS_BO.empty())
-        fail_exit("No shouldUseNewBlurOptimizations");
-    blur_optimizations_hook =
-        HyprlandAPI::createFunctionHook(PHANDLE, FNS_BO[0].address, (void*)hook_blur_optimizations);
-    Log::logger->log(LOG, "[Hyprtasking] Attempting hook {}", FNS_BO[0].signature);
-    success = blur_optimizations_hook->hook() && success;
-
-    // Hyprland 0.56 moved CMonitor into the Monitor namespace; keep the
-    // mangled signature in sync with Monitor::CMonitor.
-    static auto FNS2 = HyprlandAPI::findFunctionsByName(
-        PHANDLE,
-        "_ZN6Render13IHyprRenderer18shouldRenderWindowEN9Hyprutils6Memory14CSharedPointerIN7Desktop4View7CWindowEEENS3_IN7Monitor8CMonitorEEE"
-    );
-    if (FNS2.empty())
-        fail_exit("No shouldRenderWindow");
-    should_render_window_hook =
-        HyprlandAPI::createFunctionHook(PHANDLE, FNS2[0].address, (void*)hook_should_render_window);
-    Log::logger->log(LOG, "[Hyprtasking] Attempting hook {}", FNS2[0].signature);
-    success = should_render_window_hook->hook() && success;
-
-    // Right now (in v0.54.0) there are several "renderWindow" functions
-    // This is needed so it won't break on update that adds/removes a
-    // function with this name
-    // This, however, requires checking for signautre changes
-    // Use this command to get the signature:
-    // strings /usr/bin/hyprland | grep renderWindow
-    static auto FNS3 = HyprlandAPI::findFunctionsByName(
-        PHANDLE,
-        "_ZN6Render13IHyprRenderer12renderWindowEN9Hyprutils6Memory14CSharedPointerIN7Desktop4View7CWindowEEENS3_IN7Monitor8CMonitorEEERKNSt6chrono10time_pointINSB_3_V212steady_clockENSB_8durationIlSt5ratioILl1ELl1000000000EEEEEEbNS_15eRenderPassModeEbb"
-    );
-    if (FNS3.empty())
-        fail_exit("No renderWindow");
-    render_window = FNS3[0].address;
-
-    static auto FNS4 = HyprlandAPI::findFunctionsByName(PHANDLE, "isSolitaryBlocked");
-    if (FNS4.empty())
-        fail_exit("No isSolitaryBlocked");
-
-    is_solitary_blocked_hook =
-        HyprlandAPI::createFunctionHook(PHANDLE, FNS4[0].address, (void*)hook_is_solitary_blocked);
-    Log::logger->log(LOG, "[Hyprtasking] Attempting hook {}", FNS4[0].signature);
-    success = is_solitary_blocked_hook->hook() && success;
-
-    if (!success)
-        fail_exit("Failed initializing hooks");
+    render_workspace_hook = hook(find_function("renderWorkspace", {
+        "Render::IHyprRenderer::renderWorkspace(Render::CRenderContext&",
+        "Hyprutils::Math::CBox const&)"
+    }), reinterpret_cast<void*>(hook_render_workspace));
+    render_texture_hook = hook(find_function("renderTexture", {
+        "Render::GL::CHyprOpenGLImpl::renderTexture(Render::CRenderContext&",
+        "Render::GL::CHyprOpenGLImpl::STextureRenderData)"
+    }), reinterpret_cast<void*>(hook_render_texture));
+    render_border_hook = hook(find_function("renderBorder", {
+        "Render::GL::CHyprOpenGLImpl::renderBorder(Render::CRenderContext&",
+        "Config::CGradientValueData const&, Render::GL::CHyprOpenGLImpl::SBorderRenderData)"
+    }), reinterpret_cast<void*>(hook_render_border));
+    render_border2_hook = hook(find_function("renderBorder", {
+        "Render::GL::CHyprOpenGLImpl::renderBorder(Render::CRenderContext&",
+        "Config::CGradientValueData const&, float, Render::GL::CHyprOpenGLImpl::SBorderRenderData)"
+    }), reinterpret_cast<void*>(hook_render_border2));
+    blur_optimizations_hook = hook(find_function("shouldUseNewBlurOptimizations", {
+        "Render::IHyprRenderer::shouldUseNewBlurOptimizations(Render::CRenderContext&",
+        "Desktop::View::CLayerSurface",
+        "Desktop::View::CWindow"
+    }), reinterpret_cast<void*>(hook_blur_optimizations));
+    should_render_window_hook = hook(find_function("shouldRenderWindow", {
+        "Render::IHyprRenderer::shouldRenderWindow(",
+        "Desktop::View::CWindow",
+        "Monitor::CMonitor"
+    }), reinterpret_cast<void*>(hook_should_render_window));
+    render_window = find_function("renderWindow", {
+        "Render::IHyprRenderer::renderWindow(Render::CRenderContext&",
+        "Render::SWindowRenderPresentation const&",
+        "Render::eRenderPassMode, bool, bool)"
+    }).address;
+    is_solitary_blocked_hook = hook(find_function("isSolitaryBlocked", {
+        "Monitor::CMonitor::isSolitaryBlocked(bool)"
+    }), reinterpret_cast<void*>(hook_is_solitary_blocked));
 }
 
 static void register_callbacks() {
-    static auto P1 = Event::bus()->m_events.input.mouse.button.listen(on_mouse_button);
-    static auto P2 = Event::bus()->m_events.input.mouse.move.listen(on_mouse_move);
-    static auto P3 = Event::bus()->m_events.input.mouse.axis.listen(on_mouse_axis);
-    static auto PKEY = Event::bus()->m_events.input.keyboard.key.listen(on_key);
+    listeners.emplace_back(Event::bus()->m_events.input.mouse.button.listen(on_mouse_button));
+    listeners.emplace_back(Event::bus()->m_events.input.mouse.move.listen(on_mouse_move));
+    listeners.emplace_back(Event::bus()->m_events.input.mouse.axis.listen(on_mouse_axis));
+    listeners.emplace_back(Event::bus()->m_events.input.keyboard.key.listen(on_key));
 
     // TODO: support touch
-    static auto P4 = Event::bus()->m_events.input.touch.down.listen([&] (ITouch::SDownEvent e, Event::SCallbackInfo i) { cancel_event(i); } );
-    static auto P5 = Event::bus()->m_events.input.touch.up.listen([&] (ITouch::SUpEvent e, Event::SCallbackInfo i) { cancel_event(i); } );
-    static auto P6 = Event::bus()->m_events.input.touch.motion.listen([&] (ITouch::SMotionEvent e, Event::SCallbackInfo i) { cancel_event(i); } );
-    // static auto P7 = Event::bus()->m_events.input.touch.cancel.listen([&] (ITouch::SCancelEvent e, Event::SCallbackInfo i) { cancel_event(i); } );
+    listeners.emplace_back(
+        Event::bus()->m_events.input.touch.down.listen(
+            [](ITouch::SDownEvent e, Event::SCallbackInfo i) { cancel_event(i); }
+        )
+    );
+    listeners.emplace_back(
+        Event::bus()->m_events.input.touch.up.listen(
+            [](ITouch::SUpEvent e, Event::SCallbackInfo i) { cancel_event(i); }
+        )
+    );
+    listeners.emplace_back(
+        Event::bus()->m_events.input.touch.motion.listen(
+            [](ITouch::SMotionEvent e, Event::SCallbackInfo i) { cancel_event(i); }
+        )
+    );
 
-
-    static auto P7 = Event::bus()->m_events.gesture.swipe.begin.listen(on_swipe_begin);
-    static auto P8 = Event::bus()->m_events.gesture.swipe.update.listen(on_swipe_update);
-    static auto P9 = Event::bus()->m_events.gesture.swipe.end.listen(on_swipe_end);
-
-    static auto P10 = Event::bus()->m_events.config.reloaded.listen(on_config_reloaded);
-    static auto P11 = Event::bus()->m_events.monitor.added.listen(register_monitors);
-    static auto P12 = Event::bus()->m_events.monitor.removed.listen(on_monitor_removed);
+    listeners.emplace_back(Event::bus()->m_events.gesture.swipe.begin.listen(on_swipe_begin));
+    listeners.emplace_back(Event::bus()->m_events.gesture.swipe.update.listen(on_swipe_update));
+    listeners.emplace_back(Event::bus()->m_events.gesture.swipe.end.listen(on_swipe_end));
+    listeners.emplace_back(Event::bus()->m_events.config.reloaded.listen(on_config_reloaded));
+    listeners.emplace_back(Event::bus()->m_events.monitor.added.listen(register_monitors));
+    listeners.emplace_back(Event::bus()->m_events.monitor.removed.listen(on_monitor_removed));
+    // Nested outputs can receive their first nonzero size after monitor creation.
+    listeners.emplace_back(Event::bus()->m_events.monitor.layoutChanged.listen(register_monitors));
 }
-
 
 // every dispatcher funciton must have DISPATCHER(name) this to work
 #define add_dispatcher(name) { \
@@ -738,8 +768,9 @@ static int lua_is_active(lua_State* L) {
 }
 
 static void add_dispatchers() {
-    add_dispatcher(if_not_active);
-    add_dispatcher(if_active);
+    add_dispatcher(prepare_reload);
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprtasking", "if_not_active", lua_if_not_active);
+    HyprlandAPI::addLuaFunction(PHANDLE, "hyprtasking", "if_active", lua_if_active);
     add_dispatcher(toggle);
     add_dispatcher(move);
     add_dispatcher(movewindow);
@@ -749,13 +780,18 @@ static void add_dispatchers() {
     HyprlandAPI::addLuaFunction(PHANDLE, "hyprtasking", "is_active", lua_is_active);
 }
 
-#define addConfigValue(T, config, descr, value) do { \
-    SP<Config::Values::IValue> ivalue = makeShared<T>("plugin:hyprtasking:" config, (descr), (value)); \
-    const auto RET = Config::mgr()->registerPluginValue(PHANDLE, ivalue); \
-    if (!RET) { \
-        Log::logger->log(ERR, "[Hyprtasking] could not register value \"{}\"", ivalue->name()); \
-    } \
-} while (0)
+#define addConfigValue(T, config, descr, value, ...) \
+    do { \
+        SP<Config::Values::IValue> ivalue = makeShared<T>( \
+            "plugin:hyprtasking:" config, \
+            (descr), \
+            (value)__VA_OPT__(, ) __VA_ARGS__ \
+        ); \
+        const auto RET = Config::mgr()->registerPluginValue(PHANDLE, ivalue); \
+        if (!RET) { \
+            LOG(Log::ERR, "[Hyprtasking] could not register value \"{}\"", ivalue->name()); \
+        } \
+    } while (0)
 
 static void init_config() {
     addConfigValue(CStringValue, "layout", "layout", "grid");
@@ -783,6 +819,14 @@ static void init_config() {
     addConfigValue(CIntValue, "gestures:enabled", "enabled", 1);
     addConfigValue(CIntValue, "gestures:move_fingers", "move fingers", 3);
     addConfigValue(CFloatValue, "gestures:move_distance", "move distance", 300.0);
+    addConfigValue(CIntValue, "gestures:move_rails", "lock movement to eight directions", 1);
+    addConfigValue(
+        CFloatValue,
+        "gestures:move_commit_threshold",
+        "completion distance fraction; zero commits any travel beyond the neutral zone",
+        0.5f,
+        SFloatValueOptions {.min = 0.f, .max = 1.f}
+    );
     addConfigValue(CIntValue, "gestures:open_fingers", "open fingers", 4);
     addConfigValue(CFloatValue, "gestures:open_distance", "open distance", 300.0);
     addConfigValue(CIntValue, "gestures:open_positive", "open positive", 1);
@@ -793,6 +837,7 @@ static void init_config() {
     addConfigValue(CIntValue, "grid:layers", "layers", 1);
     addConfigValue(CIntValue, "grid:loop_layers", "loop layers", 1);
     addConfigValue(CIntValue, "grid:loop", "loop", 0);
+    addConfigValue(CIntValue, "grid:center_current", "center current workspace on the looping grid", 0);
     addConfigValue(CIntValue, "grid:gaps_use_aspect_ratio", "gaps use aspect ratio", 0);
 
     //linear specific
@@ -807,31 +852,29 @@ static void init_config() {
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     PHANDLE = handle;
 
-    const std::string COMPOSITOR_HASH = __hyprland_api_get_hash();
-    const std::string CLIENT_HASH = __hyprland_api_get_client_hash();
+    try {
+        const std::string COMPOSITOR_HASH = __hyprland_api_get_hash();
+        const std::string CLIENT_HASH = __hyprland_api_get_client_hash();
 
-    if (COMPOSITOR_HASH != CLIENT_HASH)
-        fail_exit("Mismatched headers! Can't proceed.");
+        if (COMPOSITOR_HASH != CLIENT_HASH)
+            fail_exit("Mismatched headers! Can't proceed.");
 
-    if (ht_manager == nullptr)
         ht_manager = std::make_unique<HTManager>();
-    else
-        ht_manager->reset();
+        init_config();
+        add_dispatchers();
+        register_callbacks();
+        init_functions();
+        register_monitors();
 
-    init_config();
-    add_dispatchers();
-    register_callbacks();
-    init_functions();
-    register_monitors();
-
-    Log::logger->log(LOG, "[Hyprtasking] Plugin initialized");
-
-    return {"Hyprtasking", "A workspace management plugin", "raybbian", "0.1"};
+        Log::logger->log(LOG, "[Hyprtasking] Plugin initialized");
+        return {"HyprToroid", "A workspace management plugin", "raybbian", "0.1.0"};
+    } catch (...) {
+        cleanup();
+        throw;
+    }
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
     Log::logger->log(LOG, "[Hyprtasking] Plugin exiting");
-    // prevent crashes
-    ht_manager->hide_all_views();
-    ht_manager->reset();
+    cleanup();
 }

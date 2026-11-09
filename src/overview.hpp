@@ -33,9 +33,9 @@ class HTView {
     PHLMONITOR get_monitor();
 
     void show(bool recalculate = true);
-    void hide(bool exit_on_mouse, std::optional<WORKSPACEID> target_workspace = std::nullopt);
+    void hide(bool exit_on_mouse, std::optional<WorkspaceNumber> target_workspace = std::nullopt);
 
-    void move_id(WORKSPACEID ws_id, bool move_window);
+    void move_id(std::optional<WorkspaceNumber> ws_id, bool move_window);
     // arg is up, down, left, right;
     void move(std::string arg, bool move_window);
 };

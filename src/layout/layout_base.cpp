@@ -4,7 +4,6 @@
 #include <sstream>
 #include <string_view>
 
-#define private public
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
@@ -13,7 +12,6 @@
 #include <hyprland/src/state/WorkspaceState.hpp>
 #include <hyprland/src/render/pass/RectPassElement.hpp>
 #include <hyprland/src/render/pass/TexPassElement.hpp>
-#undef private
 
 #include <hyprland/src/output/Monitor.hpp>
 
@@ -23,6 +21,14 @@
 #include "../types.hpp"
 #include "layout_base.hpp"
 
+namespace {
+class HTClearPassElement : public CClearPassElement {
+  public:
+    using CClearPassElement::CClearPassElement;
+    const char* passName() override { return "HyprtaskingClear"; }
+};
+}
+
 HTLayoutBase::HTLayoutBase(VIEWID new_view_id) : view_id(new_view_id) {
     ;
 }
@@ -31,11 +37,11 @@ void HTLayoutBase::on_move_swipe(Vector2D delta) {
     ;
 }
 
-WORKSPACEID HTLayoutBase::on_move_swipe_end() {
-    return WORKSPACE_INVALID;
+std::optional<WorkspaceNumber> HTLayoutBase::on_move_swipe_end() {
+    return std::nullopt;
 }
 
-WORKSPACEID HTLayoutBase::get_ws_id_in_direction(int x, int y, std::string& direction) {
+std::optional<WorkspaceNumber> HTLayoutBase::get_ws_id_in_direction(int x, int y, std::string& direction) {
     if (direction == "up") {
         y--;
     } else if (direction == "down") {
@@ -45,7 +51,7 @@ WORKSPACEID HTLayoutBase::get_ws_id_in_direction(int x, int y, std::string& dire
     } else if (direction == "left") {
         x--;
     } else {
-        return WORKSPACE_INVALID;
+        return std::nullopt;
     }
     return get_ws_id_from_xy(x, y);
 }
@@ -112,11 +118,11 @@ void HTLayoutBase::render() {
 
     CClearPassElement::SClearData data;
     data.color = CHyprColor {0};
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CClearPassElement>(data));
+    IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<HTClearPassElement>(data));
 }
 
-std::vector<WORKSPACEID> HTLayoutBase::jump_targets() const {
-    std::vector<std::pair<WORKSPACEID, HTWorkspace>> ordered;
+std::vector<WorkspaceNumber> HTLayoutBase::jump_targets() const {
+    std::vector<std::pair<WorkspaceNumber, HTWorkspace>> ordered;
     ordered.reserve(overview_layout.size());
     for (const auto& entry : overview_layout) {
         // Skip entries that have no tile. overview_layout is read with
@@ -147,14 +153,14 @@ std::vector<WORKSPACEID> HTLayoutBase::jump_targets() const {
         return lhs.first < rhs.first;
     });
 
-    std::vector<WORKSPACEID> result;
+    std::vector<WorkspaceNumber> result;
     result.reserve(ordered.size());
     for (const auto& entry : ordered)
         result.push_back(entry.first);
     return result;
 }
 
-std::optional<WORKSPACEID> HTLayoutBase::jump_target(size_t index) const {
+std::optional<WorkspaceNumber> HTLayoutBase::jump_target(size_t index) const {
     const auto targets = jump_targets();
     if (index >= targets.size())
         return std::nullopt;
@@ -220,26 +226,22 @@ void HTLayoutBase::render_jump_labels() {
         badge.box = badge_box;
         badge.color = background_color;
         badge.round = std::round(std::min(badge_size.x, badge_size.y) * 0.22f);
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(badge));
+        IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CRectPassElement>(badge));
 
         CTexPassElement::SRenderData text;
         text.tex = texture;
         text.box = CBox {badge_pos + (badge_size - texture->m_size) / 2.f, texture->m_size};
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(std::move(text)));
+        IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CTexPassElement>(std::move(text)));
     }
 }
 
 const std::string CLEAR_PASS_ELEMENT_NAME = "CClearPassElement";
 
 void HTLayoutBase::post_render() {
-    bool first = true;
-    std::erase_if(g_pHyprRenderer->m_renderPass.m_passElements, [&first](const auto& e) {
-        bool res = e.element->passName() == CLEAR_PASS_ELEMENT_NAME && !first;
-        first = false;
-        return res;
-    });
+    // Keep our initial clear; remove only the clears queued by each workspace.
+    IHyprRenderer::currentPass(g_pHyprRenderer->context()).removeAllOfType(CLEAR_PASS_ELEMENT_NAME);
     render_jump_labels();
-    g_pHyprRenderer->m_renderPass.add(makeUnique<HTPassElement>());
+    IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<HTPassElement>());
     // g_pHyprOpenGL->setDamage(CRegion {CBox {0, 0, INT32_MAX, INT32_MAX}});
 
     // Hand the blur-FB state back exactly as render() found it, so a refresh that
@@ -257,31 +259,31 @@ PHLMONITOR HTLayoutBase::get_monitor() {
     return par_view->get_monitor();
 }
 
-WORKSPACEID HTLayoutBase::get_ws_id_from_global(Vector2D pos) {
+std::optional<WorkspaceNumber> HTLayoutBase::get_ws_id_from_global(Vector2D pos) {
     const PHLMONITOR monitor = get_monitor();
     if (monitor == nullptr)
-        return WORKSPACE_INVALID;
+        return std::nullopt;
 
     if (!monitor->logicalBox().containsPoint(pos))
-        return WORKSPACE_INVALID;
+        return std::nullopt;
 
     Vector2D relative_pos = (pos - monitor->m_position) * monitor->m_scale;
     for (const auto& [id, layout] : overview_layout)
         if (layout.box.containsPoint(relative_pos))
             return id;
 
-    return WORKSPACE_INVALID;
+    return std::nullopt;
 }
 
-WORKSPACEID HTLayoutBase::get_ws_id_from_xy(int x, int y) {
+std::optional<WorkspaceNumber> HTLayoutBase::get_ws_id_from_xy(int x, int y) {
     for (const auto& [id, layout] : overview_layout)
         if (layout.x == x && layout.y == y)
             return id;
 
-    return WORKSPACE_INVALID;
+    return std::nullopt;
 }
 
-CBox HTLayoutBase::get_global_window_box(PHLWINDOW window, WORKSPACEID workspace_id) {
+CBox HTLayoutBase::get_global_window_box(PHLWINDOW window, WorkspaceNumber workspace_id) {
     if (window == nullptr)
         return {};
 
@@ -289,23 +291,24 @@ CBox HTLayoutBase::get_global_window_box(PHLWINDOW window, WORKSPACEID workspace
     if (monitor == nullptr)
         return {};
 
-    const PHLWORKSPACE workspace = State::workspaceState()->query().id(workspace_id).run();
+    const PHLWORKSPACE workspace = State::workspaceState()->query()
+        .numbered(Workspace::SWorkspaceNumberedID {workspace_id}).run();
     if (workspace == nullptr || workspace->m_monitor != monitor)
         return {};
 
     const CBox ws_window_box = window->getWindowMainSurfaceBox();
 
     const Vector2D top_left =
-        local_ws_unscaled_to_global(ws_window_box.pos() - monitor->m_position, workspace->m_id);
+        local_ws_unscaled_to_global(ws_window_box.pos() - monitor->m_position, workspace_id);
     const Vector2D bottom_right = local_ws_unscaled_to_global(
         ws_window_box.pos() + ws_window_box.size() - monitor->m_position,
-        workspace->m_id
+        workspace_id
     );
 
     return {top_left, bottom_right - top_left};
 }
 
-CBox HTLayoutBase::get_global_ws_box(WORKSPACEID workspace_id) {
+CBox HTLayoutBase::get_global_ws_box(WorkspaceNumber workspace_id) {
     const CBox scaled_ws_box = overview_layout[workspace_id].box;
     const Vector2D top_left = local_ws_scaled_to_global(scaled_ws_box.pos(), workspace_id);
     const Vector2D bottom_right =
@@ -313,7 +316,7 @@ CBox HTLayoutBase::get_global_ws_box(WORKSPACEID workspace_id) {
     return {top_left, bottom_right - top_left};
 }
 
-Vector2D HTLayoutBase::global_to_local_ws_unscaled(Vector2D pos, WORKSPACEID workspace_id) {
+Vector2D HTLayoutBase::global_to_local_ws_unscaled(Vector2D pos, WorkspaceNumber workspace_id) {
     const PHLMONITOR monitor = get_monitor();
     if (monitor == nullptr)
         return {};
@@ -329,7 +332,7 @@ Vector2D HTLayoutBase::global_to_local_ws_unscaled(Vector2D pos, WORKSPACEID wor
     return pos;
 }
 
-Vector2D HTLayoutBase::global_to_local_ws_scaled(Vector2D pos, WORKSPACEID workspace_id) {
+Vector2D HTLayoutBase::global_to_local_ws_scaled(Vector2D pos, WorkspaceNumber workspace_id) {
     const PHLMONITOR monitor = get_monitor();
     if (monitor == nullptr)
         return {};
@@ -339,7 +342,7 @@ Vector2D HTLayoutBase::global_to_local_ws_scaled(Vector2D pos, WORKSPACEID works
     return pos;
 }
 
-Vector2D HTLayoutBase::local_ws_unscaled_to_global(Vector2D pos, WORKSPACEID workspace_id) {
+Vector2D HTLayoutBase::local_ws_unscaled_to_global(Vector2D pos, WorkspaceNumber workspace_id) {
     const PHLMONITOR monitor = get_monitor();
     if (monitor == nullptr)
         return {};
@@ -355,7 +358,7 @@ Vector2D HTLayoutBase::local_ws_unscaled_to_global(Vector2D pos, WORKSPACEID wor
     return pos;
 }
 
-Vector2D HTLayoutBase::local_ws_scaled_to_global(Vector2D pos, WORKSPACEID workspace_id) {
+Vector2D HTLayoutBase::local_ws_scaled_to_global(Vector2D pos, WorkspaceNumber workspace_id) {
     const PHLMONITOR monitor = get_monitor();
     if (monitor == nullptr)
         return {};

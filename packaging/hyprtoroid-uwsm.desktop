@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=HyprToroid (UWSM)
+Comment=HyprToroid managed desktop session
+Exec=uwsm start -e -D Hyprland -N "HyprToroid (UWSM)" -- hyprtoroid --managed-session
+TryExec=uwsm
+Type=Application
+Keywords=tiling;wayland;compositor;

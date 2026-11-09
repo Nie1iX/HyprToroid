@@ -73,6 +73,7 @@ void HTLayoutLinear::close_open_lerp(float perc) {
 }
 
 void HTLayoutLinear::on_show(CallbackFun on_complete) {
+    view_offset->resetAllCallbacks();
     CScopeGuard x([this, &on_complete] {
         if (on_complete != nullptr)
             view_offset->setCallbackOnEnd(on_complete);
@@ -89,6 +90,7 @@ void HTLayoutLinear::on_show(CallbackFun on_complete) {
 }
 
 void HTLayoutLinear::on_hide(CallbackFun on_complete) {
+    view_offset->resetAllCallbacks();
     CScopeGuard x([this, &on_complete] {
         if (on_complete != nullptr)
             view_offset->setCallbackOnEnd(on_complete);
@@ -103,7 +105,7 @@ void HTLayoutLinear::on_hide(CallbackFun on_complete) {
     *dim_opacity = 0;
 }
 
-void HTLayoutLinear::on_move(WORKSPACEID old_id, WORKSPACEID new_id, CallbackFun on_complete) {
+void HTLayoutLinear::on_move(WorkspaceNumber old_id, WorkspaceNumber new_id, CallbackFun on_complete) {
     CScopeGuard x([this, &on_complete] {
         if (on_complete != nullptr)
             scroll_offset->setCallbackOnEnd(on_complete);
@@ -115,7 +117,8 @@ void HTLayoutLinear::on_move(WORKSPACEID old_id, WORKSPACEID new_id, CallbackFun
 
     const float GAP_SIZE = HTConfig::value<Config::FLOAT>("gap_size") * monitor->m_scale;
 
-    const PHLWORKSPACE new_ws = State::workspaceState()->query().id(new_id).run();
+    const PHLWORKSPACE new_ws = State::workspaceState()->query()
+        .numbered(Workspace::SWorkspaceNumberedID {new_id}).run();
     if (new_ws == nullptr)
         return;
 
@@ -214,7 +217,10 @@ bool HTLayoutLinear::should_render_window(PHLWINDOW window) {
     if (workspace == nullptr)
         return false;
 
-    CBox window_box = get_global_window_box(window, window->workspaceID());
+    const auto number = workspace->numberedID();
+    if (!number)
+        return false;
+    CBox window_box = get_global_window_box(window, *number);
     if (window_box.empty())
         return false;
     if (window_box.intersection(monitor->logicalBox()).empty())
@@ -280,20 +286,21 @@ void HTLayoutLinear::build_overview_layout(HTViewStage stage) {
 
     overview_layout.clear();
 
-    std::vector<WORKSPACEID> monitor_workspaces;
+    std::vector<WorkspaceNumber> monitor_workspaces;
     for (PHLWORKSPACE workspace : State::workspaceState()->workspacesCopy()) {
         if (workspace == nullptr)
             continue;
         if (workspace->m_monitor != monitor)
             continue;
-        if (workspace->m_isSpecialWorkspace)
+        const auto number = workspace->numberedID();
+        if (!number)
             continue;
-        monitor_workspaces.push_back(workspace->m_id);
+        monitor_workspaces.push_back(*number);
     }
     std::sort(monitor_workspaces.begin(), monitor_workspaces.end());
 
-    WORKSPACEID big_id = monitor_workspaces.back();
-    while (State::workspaceState()->query().id(big_id).run() != nullptr)
+    WorkspaceNumber big_id = monitor_workspaces.empty() ? 1 : monitor_workspaces.back();
+    while (State::workspaceState()->query().numbered(Workspace::SWorkspaceNumberedID {big_id}).run() != nullptr)
         big_id++;
     monitor_workspaces.push_back(big_id);
 
@@ -327,7 +334,7 @@ void HTLayoutLinear::render() {
 
 
     g_pHyprRenderer->damageMonitor(monitor);
-    g_pHyprRenderer->m_renderData.pMonitor->m_blurFBShouldRender = true;
+    g_pHyprRenderer->context().m_data.pMonitor->m_blurFBShouldRender = true;
 
     // Do a dance with active workspaces: Hyprland will only properly render the
     // current active one so make the workspace active before rendering it, etc
@@ -338,7 +345,8 @@ void HTLayoutLinear::render() {
         false,
         true
     );
-    start_workspace->m_visible = false;
+    const bool start_visible = start_workspace->visible();
+    start_workspace->setVisible(false);
 
     const PHLWORKSPACE big_ws = monitor->m_activeWorkspace;
 
@@ -350,13 +358,14 @@ void HTLayoutLinear::render() {
         false,
         true
     );
-    big_ws->m_visible = true;
+    big_ws->setVisible(true);
 
     // use pixel size for geometry
     CBox mon_box = {{0, 0}, monitor->m_pixelSize};
     // Render the current workspace on the screen
     ((render_workspace_t)(render_workspace_hook->m_original))(
         g_pHyprRenderer.get(),
+        g_pHyprRenderer->context(),
         monitor,
         big_ws,
         time,
@@ -369,7 +378,7 @@ void HTLayoutLinear::render() {
     blur_data.box = mon_box;
     blur_data.blur = (bool)HTConfig::value<Config::INTEGER>("linear:blur");
     blur_data.blurA = blur_strength->value();
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(blur_data));
+    IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CRectPassElement>(blur_data));
 
     Animation::Workspace::startAnimation(
         start_workspace,
@@ -377,7 +386,7 @@ void HTLayoutLinear::render() {
         false,
         true
     );
-    big_ws->m_visible = false;
+    big_ws->setVisible(false);
     rendering_standard_ws = false;
 
     CBox view_box = {
@@ -388,14 +397,15 @@ void HTLayoutLinear::render() {
     CRectPassElement::SRectData data;
     data.color = CHyprColor {HTConfig::value<Config::INTEGER>("bg_color")}.stripA();
     data.box = view_box;
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(data));
+    IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CRectPassElement>(data));
 
     build_overview_layout(HT_VIEW_ANIMATING);
 
     CBox global_mon_box = {monitor->m_position, monitor->m_transformedSize};
     for (const auto& [ws_id, ws_layout] : overview_layout) {
         // Could be nullptr, in which we render only layers
-        const PHLWORKSPACE workspace = State::workspaceState()->query().id(ws_id).run();
+        const PHLWORKSPACE workspace = State::workspaceState()->query()
+            .numbered(Workspace::SWorkspaceNumberedID {ws_id}).run();
 
         CBox global_box = {ws_layout.box.pos() + monitor->m_position, ws_layout.box.size()};
         if (global_box.intersection(global_mon_box).empty())
@@ -408,7 +418,7 @@ void HTLayoutLinear::render() {
         data.box = border_box;
         data.grad1 = border_col;
         data.borderSize = BORDERSIZE;
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CBorderPassElement>(data));
+        IHyprRenderer::currentPass(g_pHyprRenderer->context()).add(makeUnique<CBorderPassElement>(data));
 
         render_workspace_at_box(monitor, workspace, time, ws_layout.box);
     }
@@ -420,7 +430,7 @@ void HTLayoutLinear::render() {
         false,
         true
     );
-    start_workspace->m_visible = true;
+    start_workspace->setVisible(start_visible);
 
     // Render dragged window at mouse cursor
     const PHTVIEW cursor_view = ht_manager->get_view_from_cursor();

@@ -1,6 +1,7 @@
 #include "manager.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <unordered_set>
 #include <vector>
 
@@ -8,7 +9,6 @@
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/desktop/DesktopTypes.hpp>
 #include <hyprland/src/desktop/state/ViewState.hpp>
-#include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/state/WorkspacePlacementController.hpp>
@@ -74,12 +74,15 @@ PHLWINDOW HTManager::get_window_from_cursor(bool return_focused) {
         );
     }
 
-    const WORKSPACEID ws_id = cursor_view->layout->get_ws_id_from_global(mouse_coords);
-    const PHLWORKSPACE hovered_workspace = State::workspaceState()->query().id(ws_id).run();
+    const auto ws_id = cursor_view->layout->get_ws_id_from_global(mouse_coords);
+    if (!ws_id)
+        return nullptr;
+    const PHLWORKSPACE hovered_workspace = State::workspaceState()->query()
+        .numbered(Workspace::SWorkspaceNumberedID {*ws_id}).run();
     if (hovered_workspace == nullptr)
         return nullptr;
 
-    const Vector2D ws_coords = cursor_view->layout->global_to_local_ws_unscaled(mouse_coords, ws_id)
+    const Vector2D ws_coords = cursor_view->layout->global_to_local_ws_unscaled(mouse_coords, *ws_id)
         + cursor_monitor->m_position;
 
     const PHLWORKSPACEREF o_workspace = cursor_monitor->m_activeWorkspace;
@@ -119,9 +122,9 @@ void HTManager::show_cursor_view() {
 }
 
 void HTManager::reset() {
+    cancel_pending_window_drag();
     swipe_state = HT_SWIPE_NONE;
     swipe_amt = 0.0;
-    jump_pressed_keys.clear();
     views.clear();
 }
 
@@ -133,15 +136,18 @@ void HTManager::refresh_all_grid_caches() {
     // so the migration would never happen.
     const auto& all_rules = Config::workspaceRuleMgr()->getAllWorkspaceRules();
     for (const auto& rule : all_rules) {
-        if (rule->m_workspaceId <= 0)
-            continue;
-        const auto bound = Config::workspaceRuleMgr()->getBoundMonitorForWS(
-            rule->m_workspaceName.starts_with("name:") ? rule->m_workspaceName.substr(5)
-                                                      : rule->m_workspaceName
+        const auto& selector = rule->m_workspaceString;
+        WorkspaceNumber number = 0;
+        const auto [end, error] = std::from_chars(
+            selector.data(), selector.data() + selector.size(), number
         );
+        if (error != std::errc {} || end != selector.data() + selector.size() || number == 0)
+            continue;
+        const auto bound = Config::workspaceRuleMgr()->getBoundMonitorForWS(selector);
         if (bound == nullptr)
             continue;
-        const PHLWORKSPACE ws = State::workspaceState()->query().id(rule->m_workspaceId).run();
+        const PHLWORKSPACE ws = State::workspaceState()->query()
+            .numbered(Workspace::SWorkspaceNumberedID {number}).run();
         if (ws == nullptr)
             continue;
         if (ws->m_monitor.lock() != bound)
@@ -162,7 +168,7 @@ void HTManager::refresh_all_grid_caches() {
         return a->get_view_id() < b->get_view_id();
     });
 
-    std::unordered_set<WORKSPACEID> taken;
+    std::unordered_set<WorkspaceNumber> taken;
     for (HTLayoutGrid* grid : grids) {
         grid->refresh_workspace_cache(taken);
         for (const auto& [id, slot] : grid->cache())
@@ -177,13 +183,18 @@ void HTManager::refresh_all_grid_caches() {
     for (PHTVIEW view : views) {
         if (view == nullptr || view->layout == nullptr)
             continue;
-        if (view->active)
+        if (view->active || view->navigating)
             continue;
         view->layout->init_position();
     }
 }
 
 void HTManager::remove_view_for_monitor_id(MONITORID mid) {
+    if (pending_window_drag) {
+        const auto view = pending_window_drag->view.lock();
+        if (view == nullptr || view->monitor_id == mid)
+            cancel_pending_window_drag();
+    }
     std::erase_if(views, [mid](const PHTVIEW& v) {
         return v == nullptr || v->monitor_id == mid;
     });

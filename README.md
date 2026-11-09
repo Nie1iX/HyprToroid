@@ -1,355 +1,133 @@
-<div align="center">
-  <h1>Hyprtasking</h1>
-  <p>Powerful workspace management plugin, packed with features.</p>
-</div>
+# HyprToroid
 
-> [!Important]
-> - Supports Hyprland releases `v0.46.2`-`v0.56.2`.
+A toroidal workspace grid and configurable desktop session for native Hyprland on Arch Linux/CachyOS.
 
-https://github.com/user-attachments/assets/8d6cdfd2-2b17-4240-a117-1dbd2231ed4e
+The C++ plugin is derived from [Hyprtasking](https://github.com/raybbian/hyprtasking). Its upstream Git history and BSD-3-Clause notices are retained.
 
-#### [Jump To Installation](#Installation)
-
-#### [See Configuration](#Configuration)
-
-## Roadmap
-
-- [ ] Modular Layouts
-    - [x] Grid layout
-    - [x] Linear layout
-    - [ ] Minimap layout
-- [x] Mouse controls
-    - [x] Exit into workspace (hover, click)
-    - [x] Drag and drop windows
-- [x] Keyboard controls
-    - [x] Switch workspaces with direction
-    - [x] Switch workspaces with jump labels
-- [x] Multi-monitor support (tested)
-- [x] Monitor scaling support (tested)
-- [x] Animation support
-- [x] Configurability
-    - [x] Overview exit behavior
-    - [x] Number of visible workspaces
-    - [x] Custom workspace layouts
-    - [x] Toggle behavior
-    - [x] Toggle keybind
-- [x] Touchpad gesture support
-- [ ] Touchscreen support
-- [x] Overview layers
+Targets the installed Hyprland 0.57.1 APIs. The compositor/plugin ABI check remains enabled. Rebuild and verify the plugin after Hyprland updates; loading arbitrary incompatible native code can crash the compositor.
 
 ## Installation
 
-### Hyprpm
+The Arch package installs these runtime paths, with no dependency on where the source checkout lives:
 
-```
-hyprpm add https://github.com/raybbian/hyprtasking
-hyprpm enable hyprtasking
-```
+- `/usr/bin/hyprtoroid`: session/development CLI.
+- `/usr/lib/hyprtoroid/libhyprtoroid.so`: packaged plugin.
+- `/usr/lib/hyprtoroid/hyprsession`: session restoration helper.
+- `/usr/share/hyprtoroid/`: default Lua profile, keybinding help and Noctalia minimap.
+- `/usr/share/wayland-sessions/hyprtoroid*.desktop`: generic standalone and UWSM session entries. GPU-specific login entries are not shipped.
 
-Hyprland plugins must match the compositor ABI exactly. For tagged Hyprland
-releases, Hyprpm uses the compatibility pins in `hyprpm.toml` to select the
-corresponding hyprtasking revision.
+Clone the public source, then build from a **separate working directory** outside the checkout. The package downloads the independent Hyprsession source at a pinned commit and verifies its checksum; a sibling checkout is not required.
 
-### Nix
-
-Add hyprtasking to your flake inputs
-```nix
-# flake.nix
-{
-  inputs = {
-    hyprland.url = "github:hyprwm/Hyprland/v0.56.0";
-
-    hyprtasking = {
-      url = "github:raybbian/hyprtasking";
-      inputs.hyprland.follows = "hyprland";
-    };
-  };
-  # ...
-}
-
+```sh
+git clone https://github.com/Nie1iX/hyprtoroid.git "$HOME/hyprtoroid"
+package_dir=$(mktemp -d /tmp/hyprtoroid-package.XXXXXXXX)
+cd "$package_dir"
+cp "$HOME/hyprtoroid/packaging/PKGBUILD" .
+HYPRTOROID_SOURCE_DIR="$HOME/hyprtoroid" makepkg -s
+sudo pacman -U ./hyprtoroid-*.pkg.tar.zst
 ```
 
-Include the plugin in the hyprland home manager options
+The checkout can live elsewhere: set `HYPRTOROID_SOURCE_DIR` to its path. For local Hyprsession development, set `HYPRSESSION_SOURCE_DIR` explicitly to that checkout; this replaces the pinned download. The makepkg working directory must be outside both local checkouts and must not contain either of them. Build dependencies include the system Hyprland development headers, Meson/Ninja, GCC and Cargo. `CARGO`/`RUSTC` can select an existing Rust toolchain. Package installation needs administrator authorization; ordinary development/reload does not. Nothing is published automatically.
 
-```nix
-# home.nix
-{ inputs, pkgs, ... }:
-{
-  wayland.windowManager.hyprland = {
-    plugins = [
-      inputs.hyprtasking.packages.${pkgs.system}.hyprtasking
-    ];
-  }
-}
-```
+Choose **HyprToroid** or **HyprToroid (UWSM)** at the login screen. The launcher refuses to start another real session inside an existing graphical session. `hyprtoroid --session` is also available from a logged-in TTY.
 
-### Manual
+## Personal settings
 
-To build, install Hyprland headers from the exact compositor commit you are
-running and then:
-
-```
-meson setup build
-cd build && meson compile
-```
-
-Then use `hyprctl plugin load` to load the absolute path to the `.so` file:
-
-```
-hyprctl plugin load "$(realpath libhyprtasking.so)"
-```
-
-## Usage
-
-### Opening Overview
-
-- Bind `hyprtasking:toggle, all` to a keybind to open/close the overlay on all monitors.
-- Bind `hyprtasking:toggle, cursor` to a keybind to open the overlay on one monitor and close on all monitors.
-- Swipe up/down on a touchpad device to open/close the overlay on one monitor.
-- See [below](#Configuration) for configuration options.
-
-### Interaction
-
-- Workspace Transitioning:
-    - Open the overlay, then use **right click** to switch to a workspace
-    - Use the directional dispatchers `hyprtasking:move` to switch to a workspace
-    - With `jump.enabled` enabled, press the label shown over a workspace to jump to it
-      (`1`-`9`, `0`, then `a`-`z`). Set `jump.show_workspace_names` to display
-      workspace names such as `A1` instead of the keyboard jump labels.
-- Window management:
-    - **Left click** to drag and drop windows around
-
-## Configuration
-
-Example below:
+Keep personal preferences outside the package, in `${XDG_CONFIG_HOME:-$HOME/.config}/hyprtoroid/config.lua`. This optional Lua file is loaded last. For example:
 
 ```lua
-hl.bind("SUPER + TAB", function() hl.plugin.hyprtasking.toggle("cursor") end)
-hl.bind("SUPER + SPACE", function() hl.plugin.hyprtasking.toggle("all") end)
-
--- escape closes the overview if it's open
-hl.bind("escape", function()
-  if hl.plugin.hyprtasking.is_active() then
-    hl.plugin.hyprtasking.toggle('all')
-  end
-end, { non_consuming = true })
-
-hl.bind("SUPER + X", function() hl.plugin.hyprtasking.killhovered() end)
-
-hl.bind("SUPER + H", function() hl.plugin.hyprtasking.move("left") end)
-hl.bind("SUPER + J", function() hl.plugin.hyprtasking.move("down") end)
-hl.bind("SUPER + K", function() hl.plugin.hyprtasking.move("up") end)
-hl.bind("SUPER + L", function() hl.plugin.hyprtasking.move("right") end)
-
-hl.bind("SUPER + A", function() hl.plugin.hyprtasking.move("out") end)
-hl.bind("SUPER + SHIFT + A", function() hl.plugin.hyprtasking.movewindow("out") end)
-
-hl.bind("SUPER + CTRL + 1", function() hl.plugin.hyprtasking.setlayer(1) end)
-hl.bind("SUPER + CTRL + 2", function() hl.plugin.hyprtasking.setlayer(2) end)
-
 hl.config({
-  plugin = {
-    hyprtasking = {
-      layout = "grid",
-
-      gap_size = 10,
-      bg_color = 0xff26233a,
-      border_size = 2,
-      exit_on_hovered = false,
-      warp_on_move_window = 1,
-      close_overview_on_reload = false,
-
-      -- for other mouse buttons see <linux/input-event-codes.h>
-      drag_button = 0x110,   -- left mouse button
-      select_button = 0x111, -- right mouse button
-
-      jump = {
-        enabled = false,
-        show_workspace_names = false,
-        label_color = 0xffffffff,
-        label_background = 0x000000cc,
-        label_size = 32,
-      },
-
-      gestures = {
-        enabled = true,
-        move_fingers = 3,
-        move_distance = 300,
-        open_fingers = 4,
-        open_distance = 300,
-        open_positive = true,
-      },
-
-      grid = {
-        rows = 3,
-        cols = 3,
-        loop = false,
-        layers = 2,
-        loop_layers = true,
-        gaps_use_aspect_ratio = true,
-      },
-
-      linear = {
-        top = false,
-        height = 400,
-        scroll_speed = 1.0,
-        blur = false,
-      }
-    }
-  },
+    plugin = { hyprtasking = { gestures = {
+        move_rails = true,
+        move_commit_threshold = 0.05,
+    } } },
 })
-
 ```
 
-<details><summary>
-Click here to see the old hyprlang syntax
-</summary>
+Apply changes with **Super+Shift+C** or `hyprctl reload`. Do not edit `/usr/share` for personal settings; package upgrades can replace it. Monitor scaling and keyboard layout belong in this user file. User overrides can distinguish the real session from a preview using `HYPRTOROID_SESSION`.
 
-```
-bind = SUPER, tab, hyprtasking:toggle, cursor
-bind = SUPER, space, hyprtasking:toggle, all
-# NOTE: the lack of a comma after hyprtasking:toggle!
-bind = , escape, hyprtasking:if_active, hyprtasking:toggle cursor
+Application-specific window rules also belong in this file, not the reference session. The packaged profile does not impose Telegram or specially titled terminal rules.
 
+Shortcut help (**Super+/**) is English by default. An optional `${XDG_CONFIG_HOME:-$HOME/.config}/hyprtoroid/keybindings.txt` replaces the packaged help, without changing bindings. To start with the Russian translation:
 
-bind = SUPER, X, hyprtasking:killhovered
-
-bind = SUPER, H, hyprtasking:move, left
-bind = SUPER, J, hyprtasking:move, down
-bind = SUPER, K, hyprtasking:move, up
-bind = SUPER, L, hyprtasking:move, right
-
-bind = SUPER, A, hyprtasking:move, out
-bind = SUPER SHIFT, A, hyprtasking:movewindow, out
-
-bind = SUPER CTRL, 1, hyprtasking:setlayer, 1
-bind = SUPER CTRL, 2, hyprtasking:setlayer, 2
-
-plugin {
-    hyprtasking {
-        layout = grid
-
-        gap_size = 10
-        bg_color = 0xff26233a
-        border_size = 2
-        exit_on_hovered = false
-        warp_on_move_window = 1
-        close_overview_on_reload = false
-
-        drag_button = 0x110 # left mouse button
-        select_button = 0x111 # right mouse button
-        # for other mouse buttons see <linux/input-event-codes.h>
-
-        jump {
-            enabled = false
-            label_color = 0xffffffff
-            label_background = 0x000000cc
-            label_size = 32
-        }
-
-        gestures {
-            enabled = true
-            move_fingers = 3
-            move_distance = 300
-            open_fingers = 4
-            open_distance = 300
-            open_positive = true
-        }
-
-        grid {
-            rows = 3
-            cols = 3
-            loop = false
-            layers = 2
-            loop_layers = true
-            gaps_use_aspect_ratio = true
-        }
-
-        linear {
-            top = false
-            height = 400
-            scroll_speed = 1.0
-            blur = false
-        }
-    }
-}
+```sh
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/hyprtoroid"
+cp /usr/share/hyprtoroid/keybindings.ru.txt "${XDG_CONFIG_HOME:-$HOME/.config}/hyprtoroid/keybindings.txt"
 ```
 
-</details>
+Edit that user-owned copy to reflect personal shortcuts. Preview sessions copy both personal `config.lua` and help, while keeping their runtime state isolated.
 
-### Dispatchers
+Optional `~/.config/hyprtoroid/session.env` contains trusted shell settings for session startup:
 
-- `hyprtasking:if_active, ARG` takes in a dispatch command (one that would be used after `hyprctl dispatch ...`) that will be dispatched only if the cursor overview is active.
-    - Allows you to use e.g. `escape` to close the overview when it is active. See the [example config](#configuration) for more info.
+```sh
+HYPRTOROID_GPU=nvidia
+```
 
-- `hyprtasking:if_not_active, ARG` same as above, but if the overview is not active.
+GPU choices are `auto`, `intel` and `nvidia`; the launcher discovers card nodes by vendor instead of hardcoding PCI addresses. An explicit `--gpu` overrides the user preference. The generic default is `auto`.
 
-- `hyprtasking:toggle [, ARG]` takes 1 optional argument that is either `cursor` or `all`
-    - if the argument is `all`, then
-        - if all overviews are hidden, then all overviews will be shown
-        - otherwise all overviews will be hidden
-    - if the argument is `cursor` or no argument is given, then
-        - if current monitor's overview is hidden, then it will be shown
-        - otherwise all overviews will be hidden
+Private login templates can be kept outside the checkout, for example in `~/.config/hyprtoroid/session-entries/`. This is storage, not a session-manager discovery directory: installing such an entry system-wide is an explicit administrator action. A separate NVIDIA entry is unnecessary when the generic launcher already reads a personal GPU preference.
 
-- `hyprtasking:move, ARG` takes in 1 argument that is one of `up`, `down`, `left`, `right`, `in`, `out`
-    - when dispatched, hyprtasking will switch workspaces with a nice animation
+## Gesture settings
 
-- `hyprtasking:movewindow, ARG` takes in 1 argument that is one of `up`, `down`, `left`, `right`, `in`, `out`
-    - when dispatched, hyprtasking will 1. move the hovered window to the workspace in the given direction relative to the window, and 2. switch to that workspace.
-<details><summary>
-<b>Click here to see the coordinate space</b>
-</summary>
+The inherited sole configuration/Lua namespace remains `plugin.hyprtasking`; it is not an external upstream plugin loaded underneath HyprToroid.
 
-<div align="center">
-<img src="https://github.com/user-attachments/assets/2c5ddf85-2a0a-412d-8ade-c2606fa920d3" width=70% height=70% alt="Coordinates">
-</div>
-</details>
+- `gestures.move_distance = 300`: finger travel corresponding to a workspace width.
+- `gestures.move_rails = true`: lock a three-finger gesture to the initial nearest horizontal, vertical or diagonal rail after the neutral zone. Reversal on the same rail is allowed; perpendicular input is ignored. Set false for free 2D motion.
+- `gestures.move_commit_threshold = 0.5`: default release threshold, a fraction of one workspace step after the neutral zone. **0 means any nonzero net travel**, not an off/legacy mode. The range is `0..1`. A zero-motion gesture, a return to the start or a cancelled gesture does not switch workspaces. Smaller values allow shorter swipes. Quick regrabs measure the new gesture only, without undoing a previous committed transition.
 
-- `hyprtasking:setlayer, ARG` takes in 1 optional argument that specifies the direction of movement across layers.
-    - if provided, the argument has to start with `+` or `-` to take effect. For example: `+1`, `-3`
-    - no arguments has the same effect as `+1`
-    - when dispatched, hyprtasking will move you through the layers in the specified direction
-    - if plugin option `grid:loop_layers` is enabled, will loop the layers if next requested layer is out of bounds (not in the range form 0 to `grid:layers`)
+The continuous neutral zone is 15% of `move_distance` per projected axis. Finger tracking has no extra smoothing delay. Release completes to a whole workspace. Looping transitions and diagonal rails are supported; a diagonal can still reveal four workspace fragments. Four-finger gestures open/close overview. Overview click selects a workspace; dragging requires more than 5 logical pixels; Escape is swallowed while closing overview.
 
-- `hyprtasking:setlayerwindow, ARG` takes in 1 optional argument that specifies the direction of movement across layers.
-    - when dispatched, hyprtasking will do the same as `hyprtasking:setlayer, ARG` and also move the window through layers
+## Live development
 
-- `hyprtasking:killhovered` behaves similarly to the standard `killactive` dispatcher with focus on hover
-    - when dispatched, hyprtasking will close the currently hovered window, useful when the overview is active.
-    - this dispatcher is designed to **replace** `hl.dsp.close()`, it will work even when the overview is **not active**.
+Editable source and installed runtime are separate.
 
-### Config Options
+The CLI resolves the source checkout from `HYPRTOROID_SOURCE`, then `~/.config/hyprtoroid/dev-source`, falling back to `~/hyprtoroid`. The checkout can live anywhere.
 
-All options are prefixed with `plugin:hyprtasking:`.
+```sh
+hyprtoroid dev build
+hyprtoroid dev preview
+hyprtoroid dev reload
+hyprtoroid status
+```
 
-| Option | Type | Description | Default |
-| --- | --- | --- | --- |
-| `layout` | `string` | The layout to use, either `grid` or `linear` | `grid` |
-| `bg_color` | `int` | The color of the background of the overlay | `0x000000FF` |
-| `gap_size` | `float` | The width in logical pixels of the gaps between workspaces | `8.f` |
-| `border_size` | `float` | The width in logical pixels of the borders around workspaces | `4.f` |
-| `exit_on_hovered` | `int` | If true, hiding the workspace will exit to the hovered workspace instead of the active workspace. | `false` |
-| `warp_on_move_window` | `int` | Works the same as `cursor:warp_on_change_workspace` (see [wiki](https://wiki.hypr.land/Configuring/Variables/#cursor)) but with the `hyprtasking:movewindow` dispatcher. <br> `cursor:warp_on_change_workspace` works only with the `hyprtasking:move` dispatcher | `1` |
-| `close_overview_on_reload` | `int` | Whether to close the overview if its layout type did not change after a Hyprland config reload | `true` |
-| `drag_button` | `int` | The mouse button to use to drag windows around | `0x110` |
-| `select_button` | `int` | The mouse button to use to select a workspace | `0x111` |
-| `gestures:enabled` | `int` | Whether or not to enable gestures | `true` |
-| `gestures:move_fingers` | `int` | The number of fingers to use for the "move" gesture | `3` |
-| `gestures:move_distance` | `float` | How large of a swipe on the touchpad corresponds to the width of a workspace | `300.f` |
-| `gestures:open_fingers` | `int` | The number of fingers to use for the "open" gesture | `4` |
-| `gestures:open_distance` | `float` | How large of a swipe on the touchpad is needed for the "open" gesture | `300.f` |
-| `gestures:open_positive` | `int` | `true` if swiping up should open the overlay, `false` otherwise | `true` |
-| `grid:rows` | `int` | The number of rows to display on the grid overlay | `3` |
-| `grid:cols` | `int` | The number of columns to display on the grid overlay | `3` |
-| `grid:loop` | `int` | When enabled, moving right at the far right of the grid will wrap around to the leftmost workspace, etc. | `false` |
-| `grid:layers` | `int` | The number of layers for grid layout, the third dimension | `1` |
-| `grid:loop_layers` | `int` | When enabled, moving back on the first layer will wrap around to the last layer. The reverse also works | `true` |
-| `grid:gaps_use_aspect_ratio` | `int` | When enabled, vertical gaps will be scaled to match the monitor's aspect ratio | `false` |
-| `linear:top` | `int` | Whether or not to position the overview on top of the screen | `false` |
-| `linear:blur` | `int` | Whether or not to blur the dimmed area | `true` |
-| `linear:height` | `float` | The height of the linear overlay in logical pixels | `300.f` |
-| `linear:scroll_speed` | `float` | Scroll speed modifier. Set negative to flip direction | `1.f` |
+`dev build` compiles the C++ plugin against system headers, without private Fedora/runtime include paths. `dev preview` starts an isolated nested compositor: its DBus, runtime, configuration and state are separate and physical DRM card nodes are masked with bwrap. It does not start Noctalia or session restore for the preview. Reloading a plugin inside the preview does not change the real session's selected library.
 
-<sup>FYI, "ARG" does not refer to any minecraft ARG. Why would you even ask that?
-Eww</sup>
+`dev reload` builds a candidate, copies it to an immutable per-user `.so`, checks for existing configuration errors, then asks the current plugin to prepare synchronously. It refuses while overview, gestures or dragging are active, or a consumed key press still awaits its release. On candidate/configuration failure it attempts to restore the previous selected library. Native plugin failures cannot be made crash-proof; use preview first for risky changes. The compositor and user applications are not deliberately restarted.
+
+The optional `~/.config/hyprtoroid/plugin-path` records the selected development candidate. With no selector, a new session uses the packaged library. Do not manually edit or delete the selector while the compositor is running; use `dev reload` to switch safely. Candidates are stored in `~/.local/state/hyprtoroid/candidates/`. A one-time `dev reload --active-plugin /absolute/current/library.so` supports migration from a manually loaded library.
+
+Personal Lua settings can be edited/reloaded immediately. C++ plugin features use the build/preview/reload loop above without switching desktop sessions. Changes to Hyprland itself, GPU drivers or session startup can still require a restart. The CLI never overwrites root-owned package libraries for development.
+
+## Session restore and Noctalia
+
+The [independent Hyprsession Rust fork](https://github.com/Nie1iX/hyprsession) is built into the combined HyprToroid package at the revision pinned in `packaging/PKGBUILD`. It relaunches applications and restores placement; it does not serialize process memory. Existing unrelated windows are preserved during startup merge. Incomplete restore protects the previous snapshot from autosave. State remains in `~/.local/state/hyprtoroid/hyprsession`, outside the package and source checkouts. Do not clear protection to force autosave after a failed restore.
+
+`hyprtoroid logout` uses the protected final-save/freeze/logout sequence in a HyprToroid session, including proper UWSM shutdown. It falls back to Noctalia's normal logout outside this compositor.
+
+Noctalia's minimap source can be registered as:
+
+```sh
+noctalia msg plugins source add hyprtoroid path /usr/share/hyprtoroid/noctalia-plugins
+noctalia msg plugins enable hyprtoroid/minimap
+```
+
+The bar minimap is display-only; the desktop widget supports workspace clicks. Fuzzel is the separate Wayland menu used for keybinding help, not the desktop shell.
+
+## Tests
+
+From the checkout:
+
+```sh
+meson setup build
+meson test -C build --print-errorlogs
+```
+
+The tests cover toroidal grid mapping, fixed overview projection, gesture neutral zones, eight-direction locking, completion boundaries and consumed-key ownership used by the reload guard. Assertions remain enabled with `NDEBUG`. These tests do not replace real-compositor rendering, hardware-gesture, session-restoration or multi-monitor checks.
+
+## License
+
+The plugin and its inherited code retain **BSD-3-Clause**, in `LICENSE`. Distribution must retain the copyright notice, conditions and warranty disclaimer; source disclosure is not required by BSD-3-Clause. The original authors' names may not be used to imply endorsement without permission.
+
+The [fork baseline](https://github.com/raybbian/hyprtasking/commit/41b88141702b33c39f315f3aa9113b06226727c8) is retained in Git history.
+
+The independent hyprsession fork retains its separate **GPL-3.0** license in its checkout's `LICENSE`. Its redistribution obligations are not replaced by the plugin's BSD license. Both notices are installed by the Arch package.

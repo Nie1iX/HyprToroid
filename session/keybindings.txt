@@ -1,0 +1,32 @@
+Super+/                 Open / close shortcut help (also Escape)
+Super+Enter             Kitty terminal
+Super+Space             Noctalia launcher
+Super+E                 Dolphin file manager
+Super+Tab               Open / close grid overview
+Escape                  Close grid overview
+Super+arrows            Focus a window on this workspace
+Super+Shift+arrows      Move a window within the tiling layout
+Super+1…9               Switch to workspace 1…9
+Super+Shift+1…9         Send a window to a workspace without following
+Super+Ctrl+arrows       Switch to an adjacent grid cell
+Super+Ctrl+Shift+arrows Move a window to an adjacent cell and follow
+Super+Alt+arrows        Resize width / height in 40 px steps
+Super+`                 Show / hide scratchpad
+Super+Shift+`           Send to scratchpad / return to this workspace
+Super+G                 Create / dissolve a tabbed window group
+Super+] / Super+[       Next / previous window in the group
+Super+F                 Fullscreen
+Super+Shift+Space       Toggle floating / tiled
+Super+P                 Toggle pseudotiling
+Super+left mouse drag   Move a window
+Super+right mouse drag  Resize a window
+Super+Q                 Close a window
+Alt+Tab / Alt+Shift+Tab  Next / previous window
+Super+L                 Lock screen
+Super+V                 Clipboard history
+Super+Shift+S / Print   Select screenshot region; Ctrl+C / Enter copies
+Super+Print             Copy a fullscreen screenshot to clipboard
+Super+Shift+C           Reload Hyprland configuration
+Super+Shift+Escape      Log out
+Volume keys             Volume up / down, speaker / microphone mute
+Brightness keys         Brightness up / down

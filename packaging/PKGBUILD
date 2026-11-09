@@ -61,7 +61,7 @@ package() {
     install -Dm644 "$root/session/keybindings.txt" "$pkgdir/usr/share/hyprtoroid/keybindings.txt"
     install -Dm644 "$root/session/keybindings.ru.txt" "$pkgdir/usr/share/hyprtoroid/keybindings.ru.txt"
     install -d "$pkgdir/usr/share/hyprtoroid/noctalia-plugins"
-    cp -a "$root/noctalia-plugins/." "$pkgdir/usr/share/hyprtoroid/noctalia-plugins/"
+    cp -a --no-preserve=ownership "$root/noctalia-plugins/." "$pkgdir/usr/share/hyprtoroid/noctalia-plugins/"
     install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/hyprtoroid/plugin-BSD-3-Clause"
     install -Dm644 "$srcdir/hyprsession/LICENSE" "$pkgdir/usr/share/licenses/hyprtoroid/hyprsession-GPL-3.0"
     install -Dm644 "$root/README.md" "$pkgdir/usr/share/doc/hyprtoroid/README.md"

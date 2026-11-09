@@ -29,6 +29,8 @@ sudo pacman -U ./hyprtoroid-*.pkg.tar.zst
 
 The checkout can live elsewhere: set `HYPRTOROID_SOURCE_DIR` to its path. For local Hyprsession development, set `HYPRSESSION_SOURCE_DIR` explicitly to that checkout; this replaces the pinned download. The makepkg working directory must be outside both local checkouts and must not contain either of them. Build dependencies include the system Hyprland development headers, Meson/Ninja, GCC and Cargo. `CARGO`/`RUSTC` can select an existing Rust toolchain. Package installation needs administrator authorization; ordinary development/reload does not. Nothing is published automatically.
 
+Shared resources retain their file modes, not the source checkout's ownership, when staged by `fakeroot`.
+
 Choose **HyprToroid** or **HyprToroid (UWSM)** at the login screen. The launcher refuses to start another real session inside an existing graphical session. `hyprtoroid --session` is also available from a logged-in TTY.
 
 ## Personal settings
